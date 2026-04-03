@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from backend.app.models.analytics import PerformanceMetrics
-from backend.app.models.trading import FillEvent, PnLState, PositionState
-from backend.app.models.market import OrderSide
+from app.models.analytics import PerformanceMetrics
+from app.models.trading import FillEvent, PnLState, PositionState
+from app.models.market import OrderSide
 
 
 class PerformanceAnalyzer:

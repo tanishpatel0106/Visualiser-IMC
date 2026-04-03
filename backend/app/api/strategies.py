@@ -1,18 +1,19 @@
 """Strategy and run management API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Any
 
-from backend.app.core.deps import (
+from app.core.deps import (
     get_dataset_service,
     get_storage,
     get_strategy_registry,
 )
-from backend.app.engines.sandbox.runner import StrategySandbox
-from backend.app.engines.strategies.registry import StrategyRegistry
-from backend.app.services.dataset_service import DatasetService
-from backend.app.services.strategy_service import StrategyService
-from backend.app.storage.database import StorageService
+from app.engines.sandbox.runner import StrategySandbox
+from app.engines.strategies.registry import StrategyRegistry
+from app.services.dataset_service import DatasetService
+from app.services.strategy_service import StrategyService
+from app.storage.database import StorageService
 
 router = APIRouter()
 
@@ -34,6 +35,7 @@ class RunStrategyRequest(BaseModel):
     fees: float = 0.0
     slippage: float = 0.0
     initial_cash: float = 0.0
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class CompareRequest(BaseModel):

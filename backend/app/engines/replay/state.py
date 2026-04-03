@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from backend.app.engines.orderbook.book import OrderBookEngine
-from backend.app.engines.orderbook.metrics import BookMetrics
-from backend.app.models.events import Event, EventType
-from backend.app.models.market import MarketSnapshot, TradePrint, VisibleOrderBook
-from backend.app.models.trading import (
+from app.engines.orderbook.book import OrderBookEngine
+from app.engines.orderbook.metrics import BookMetrics
+from app.models.events import Event, EventType
+from app.models.market import MarketSnapshot, TradePrint, VisibleOrderBook
+from app.models.trading import (
     FillEvent,
     InventoryState,
     PnLState,
@@ -352,7 +352,7 @@ class ReplayState:
 
 def _import_order_status(name: str):
     """Lazy import to avoid circular dependency issues."""
-    from backend.app.models.market import OrderStatus
+    from app.models.market import OrderStatus
     return OrderStatus(name)
 
 

@@ -54,7 +54,7 @@ class StrategyRegistry:
 
     def load_builtins(self) -> None:
         """Load all built-in strategies from the library modules."""
-        from backend.app.engines.strategies import (
+        from app.engines.strategies import (
             market_making,
             mean_reversion,
             microstructure,
