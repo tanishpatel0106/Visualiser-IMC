@@ -96,7 +96,7 @@ function formatTimestamp(ts: number): string {
 
 export function Header() {
   const { products, days, selectedProduct, selectedDay, setSelectedProduct, setSelectedDay, datasetInfo } = useDatasetStore();
-  const { sessionId, isPlaying, speed, currentTimestamp, currentIndex, totalEvents, pnl, setPlaying, setSpeed } = useReplayStore();
+  const { isPlaying, speed, currentTimestamp, currentIndex, totalEvents, pnl, setPlaying, setSpeed } = useReplayStore();
   const { strategies, selectedStrategy, setSelectedStrategy } = useStrategyStore();
   const { activeWorkspace, setActiveWorkspace } = useUIStore();
 
@@ -105,16 +105,13 @@ export function Header() {
       await api.pauseReplay().catch(console.error);
       setPlaying(false);
     } else {
-      if (sessionId) {
-        setPlaying(true);
-        return;
-      }
       if (selectedProduct && selectedDay !== null) {
         try {
           const session = await api.startReplay(
             [selectedProduct],
             selectedDay !== null ? [selectedDay] : []
           );
+          useReplayStore.getState().resetReplay();
           useReplayStore.getState().setSessionId(session.session_id);
           if (session.total_events) {
             useReplayStore.setState({ totalEvents: session.total_events });

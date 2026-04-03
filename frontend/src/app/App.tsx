@@ -53,6 +53,7 @@ export function App() {
 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveErrors = 0;
 
     const tick = async () => {
       if (cancelled) return;
@@ -70,8 +71,8 @@ export function App() {
           current_timestamp: (payload.current_timestamp as number) ?? 0,
           current_index: (payload.current_index as number) ?? 0,
           total_events: (payload.total_events as number) ?? 0,
-          is_playing: (payload.is_playing as boolean) ?? true,
         });
+        consecutiveErrors = 0;
 
         if (payload.done) {
           setPlaying(false);
@@ -82,7 +83,12 @@ export function App() {
         timer = setTimeout(tick, delayMs);
       } catch (err) {
         console.error('Replay step failed:', err);
-        setPlaying(false);
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= 5) {
+          setPlaying(false);
+          return;
+        }
+        timer = setTimeout(tick, 300);
       }
     };
 

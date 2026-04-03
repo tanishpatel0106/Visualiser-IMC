@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useStrategyStore, useDatasetStore, useBacktestStore } from '@/store';
+import { useStrategyStore, useDatasetStore, useBacktestStore, useUIStore } from '@/store';
 import * as api from '@/services/api';
 import type { StrategyDefinition, StrategyParameter, ExecutionModel } from '@/types';
 
@@ -130,7 +130,8 @@ function ParamInput({ param, value, onChange }: { param: StrategyParameter; valu
 export function StrategyPanel() {
   const { strategies, selectedStrategy, parameters, sourceCode, setSelectedStrategy, setParameter, setSourceCode, resetParameters } = useStrategyStore();
   const { selectedProduct, selectedDay, products, days } = useDatasetStore();
-  const { addRun, setCurrentRun } = useBacktestStore();
+  const { addRun, setCurrentRun, setMetrics, setTrace, setFills, setPnlHistory } = useBacktestStore();
+  const setBottomTab = useUIStore((s) => s.setBottomTab);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [execModel, setExecModel] = useState<ExecutionModel>('BALANCED');
@@ -184,6 +185,21 @@ export function StrategyPanel() {
       });
       addRun(run);
       setCurrentRun(run);
+
+      if (run.run_id) {
+        const [metricsRes, traceRes, fillsRes, pnlRes] = await Promise.all([
+          api.getBacktestMetrics(run.run_id),
+          api.getBacktestTrace(run.run_id),
+          api.getBacktestFills(run.run_id),
+          api.getBacktestPnl(run.run_id),
+        ]);
+        setMetrics(metricsRes);
+        setTrace(traceRes.trace ?? []);
+        setFills(fillsRes.fills ?? []);
+        setPnlHistory(pnlRes.pnl_history ?? []);
+      }
+
+      setBottomTab('fills');
     } catch (err) {
       console.error('Strategy run failed:', err);
       setRunError(err instanceof Error ? err.message : 'Strategy run failed');
