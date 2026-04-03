@@ -11,7 +11,7 @@ import inspect
 import json
 import math
 
-from backend.app.engines.strategies.registry import StrategyDefinition
+from app.engines.strategies.registry import StrategyDefinition
 
 
 # =====================================================================
@@ -62,7 +62,7 @@ class EMACrossover:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -171,7 +171,7 @@ class SMACrossover:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -259,7 +259,7 @@ class BreakoutStrategy:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -345,7 +345,7 @@ class MomentumStrategy:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -436,7 +436,7 @@ class TradeFlowMomentum:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:

@@ -11,7 +11,7 @@ import inspect
 import json
 import math
 
-from backend.app.engines.strategies.registry import StrategyDefinition
+from app.engines.strategies.registry import StrategyDefinition
 
 
 # =====================================================================
@@ -71,7 +71,7 @@ class FixedSpreadMaker:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data = {}
         if state.traderData:
@@ -138,7 +138,7 @@ class InventorySkewedMaker:
         self.skew_factor = 0.5
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data = {}
         if state.traderData:
@@ -214,7 +214,7 @@ class AdaptiveSpreadMaker:
         self.volatility_window = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -318,7 +318,7 @@ class ReservationPriceMaker:
         self.kappa = 1.5
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -427,7 +427,7 @@ class LadderMaker:
         self.max_position = 30
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:

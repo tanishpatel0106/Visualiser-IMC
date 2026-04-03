@@ -4,11 +4,11 @@ import logging
 import re
 from typing import Optional
 
-from backend.app.engines.data.aggregator import DataAggregator
-from backend.app.engines.data.loader import DataLoader
-from backend.app.engines.data.normalizer import DataNormalizer
-from backend.app.models.events import Event
-from backend.app.models.market import MarketSnapshot, TradePrint
+from app.engines.data.aggregator import DataAggregator
+from app.engines.data.loader import DataLoader
+from app.engines.data.normalizer import DataNormalizer
+from app.models.events import Event
+from app.models.market import MarketSnapshot, TradePrint
 
 logger = logging.getLogger(__name__)
 

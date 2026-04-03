@@ -2,9 +2,9 @@
 
 import pytest
 
-from backend.app.engines.replay.engine import ReplayEngine
-from backend.app.engines.replay.state import ReplayState
-from backend.app.models.events import Event, EventType
+from app.engines.replay.engine import ReplayEngine
+from app.engines.replay.state import ReplayState
+from app.models.events import Event, EventType
 
 
 # ======================================================================

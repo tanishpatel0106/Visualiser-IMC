@@ -6,11 +6,11 @@ import tempfile
 import pandas as pd
 import pytest
 
-from backend.app.engines.data.loader import DataLoader
-from backend.app.engines.data.normalizer import DataNormalizer
-from backend.app.engines.data.aggregator import DataAggregator
-from backend.app.models.events import EventType
-from backend.app.models.market import MarketSnapshot, OrderSide, TradePrint
+from app.engines.data.loader import DataLoader
+from app.engines.data.normalizer import DataNormalizer
+from app.engines.data.aggregator import DataAggregator
+from app.models.events import EventType
+from app.models.market import MarketSnapshot, OrderSide, TradePrint
 
 
 # ======================================================================
@@ -250,7 +250,7 @@ class TestMergeToEventStream:
 
 class TestFilterByProduct:
     def test_filters_correctly(self, normalizer):
-        from backend.app.models.events import Event, EventType
+        from app.models.events import Event, EventType
 
         events = [
             Event(event_type=EventType.BOOK_SNAPSHOT, timestamp=100, product="X"),

@@ -12,8 +12,8 @@ and enforces position limits, fees, and slippage.
 import uuid
 from typing import Optional
 
-from backend.app.models.backtest import ExecutionModel
-from backend.app.models.market import (
+from app.models.backtest import ExecutionModel
+from app.models.market import (
     BookLevel,
     OrderSide,
     OrderStatus,
@@ -21,7 +21,7 @@ from backend.app.models.market import (
     TradePrint,
     VisibleOrderBook,
 )
-from backend.app.models.trading import FillEvent, StrategyOrder
+from app.models.trading import FillEvent, StrategyOrder
 
 
 class ExecutionEngine:

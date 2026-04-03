@@ -321,7 +321,7 @@ class StrategySandbox:
                 pass
 
         # Inject the Order class so strategies can create orders without importing
-        from backend.app.engines.sandbox.adapter import Order, OrderDepth, Trade, Listing, TradingState
+        from app.engines.sandbox.adapter import Order, OrderDepth, Trade, Listing, TradingState
         restricted_globals["Order"] = Order
         restricted_globals["OrderDepth"] = OrderDepth
         restricted_globals["Trade"] = Trade

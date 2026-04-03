@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from backend.app.models.analytics import ExecutionMetrics
-from backend.app.models.market import OrderSide, OrderStatus
-from backend.app.models.trading import FillEvent, StrategyOrder
+from app.models.analytics import ExecutionMetrics
+from app.models.market import OrderSide, OrderStatus
+from app.models.trading import FillEvent, StrategyOrder
 
 
 class ExecutionAnalyzer:

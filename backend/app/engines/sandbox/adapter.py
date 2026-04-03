@@ -11,13 +11,13 @@ StrategyOrder models.
 import uuid
 from typing import Optional
 
-from backend.app.models.market import (
+from app.models.market import (
     OrderSide,
     OrderType,
     TradePrint,
     VisibleOrderBook,
 )
-from backend.app.models.trading import StrategyOrder
+from app.models.trading import StrategyOrder
 
 
 # =====================================================================

@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 
-from backend.app.core.deps import get_dataset_service
-from backend.app.engines.analytics.indicators import TechnicalIndicators
-from backend.app.engines.data.aggregator import DataAggregator
-from backend.app.services.dataset_service import DatasetService
+from app.core.deps import get_dataset_service
+from app.engines.analytics.indicators import TechnicalIndicators
+from app.engines.data.aggregator import DataAggregator
+from app.services.dataset_service import DatasetService
 
 router = APIRouter()
 

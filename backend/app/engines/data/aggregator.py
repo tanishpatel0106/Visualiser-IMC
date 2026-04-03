@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 
-from backend.app.models.market import MarketSnapshot, TradePrint
+from app.models.market import MarketSnapshot, TradePrint
 
 logger = logging.getLogger(__name__)
 
