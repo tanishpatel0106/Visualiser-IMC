@@ -145,6 +145,7 @@ class StrategyService:
             fees=config.get("fees", 0.0),
             slippage=config.get("slippage", 0.0),
             initial_cash=config.get("initial_cash", 0.0),
+            parameters=config.get("parameters", {}),
         )
 
         # Get event stream

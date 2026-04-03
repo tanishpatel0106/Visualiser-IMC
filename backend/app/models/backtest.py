@@ -25,6 +25,7 @@ class BacktestConfig(BaseModel):
     fees: float = 0.0
     slippage: float = 0.0
     initial_cash: float = 0.0
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"frozen": False}
 

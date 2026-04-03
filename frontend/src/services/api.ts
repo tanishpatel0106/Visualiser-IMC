@@ -14,7 +14,7 @@ import type {
   ReplayStepResponse,
 } from '@/types';
 
-const BASE = '/api';
+const BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') || '/api';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -201,6 +201,7 @@ export async function runStrategy(
     products: string[];
     days: number[];
     execution_model: string;
+    parameters?: Record<string, unknown>;
     position_limits?: Record<string, number>;
     fees?: number;
     slippage?: number;
@@ -229,7 +230,17 @@ export async function compareRuns(runIds: string[]): Promise<{ runs: BacktestRun
 // === WebSocket ===
 
 export function createReplayWebSocket(): WebSocket {
+  const wsBase = (import.meta.env.VITE_WS_BASE_URL as string | undefined)?.replace(/\/+$/, '');
+  if (wsBase) {
+    return new WebSocket(`${wsBase}/ws/replay`);
+  }
+
+  if (BASE.startsWith('http://') || BASE.startsWith('https://')) {
+    const wsUrl = `${BASE}/ws/replay`.replace(/^http/, 'ws');
+    return new WebSocket(wsUrl);
+  }
+
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = window.location.host;
-  return new WebSocket(`${protocol}//${host}/api/ws/replay`);
+  return new WebSocket(`${protocol}//${host}${BASE}/ws/replay`);
 }

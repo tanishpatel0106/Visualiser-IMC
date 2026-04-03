@@ -96,11 +96,19 @@ npm install
 npm run dev
 ```
 
-The frontend starts on `http://localhost:5173` by default.
+The frontend starts on `http://localhost:3000` by default.
+
+If your frontend is served from a different host than the backend (for example INT/prod static hosting), set API endpoints at build time:
+
+```bash
+VITE_API_BASE_URL=https://<backend-host>/api \
+VITE_WS_BASE_URL=wss://<backend-host>/api \
+npm run build
+```
 
 ### Open the Terminal
 
-Navigate to **http://localhost:5173** in your browser. The terminal will connect to the backend automatically and load sample data on startup.
+Navigate to **http://localhost:3000** in your browser. The terminal will connect to the backend automatically and load sample data on startup.
 
 ---
 

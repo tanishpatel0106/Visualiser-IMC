@@ -1,7 +1,8 @@
 """Strategy and run management API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Any
 
 from app.core.deps import (
     get_dataset_service,
@@ -34,6 +35,7 @@ class RunStrategyRequest(BaseModel):
     fees: float = 0.0
     slippage: float = 0.0
     initial_cash: float = 0.0
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class CompareRequest(BaseModel):

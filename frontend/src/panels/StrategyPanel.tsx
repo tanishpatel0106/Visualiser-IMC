@@ -137,6 +137,7 @@ export function StrategyPanel() {
   const [posLimit, setPosLimit] = useState(20);
   const [isRunning, setIsRunning] = useState(false);
   const [showSource, setShowSource] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
 
   const filteredStrategies = strategies.filter((s) =>
     s.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -156,7 +157,15 @@ export function StrategyPanel() {
   };
 
   const handleRun = async () => {
-    if (!selectedStrategy || !selectedProduct || selectedDay === null) return;
+    if (!selectedStrategy) {
+      setRunError('Select a strategy first.');
+      return;
+    }
+    if (!selectedProduct || selectedDay === null) {
+      setRunError('Select a product and day before running.');
+      return;
+    }
+    setRunError(null);
     setIsRunning(true);
     try {
       const positionLimits: Record<string, number> = {};
@@ -167,6 +176,7 @@ export function StrategyPanel() {
         products: selectedProduct ? [selectedProduct] : products,
         days: selectedDay !== null ? [selectedDay] : days,
         execution_model: execModel,
+        parameters,
         position_limits: positionLimits,
         fees: 0,
         slippage: 0,
@@ -175,6 +185,7 @@ export function StrategyPanel() {
       setCurrentRun(run);
     } catch (err) {
       console.error('Strategy run failed:', err);
+      setRunError(err instanceof Error ? err.message : 'Strategy run failed');
     } finally {
       setIsRunning(false);
     }
@@ -352,6 +363,11 @@ export function StrategyPanel() {
 
         {/* Action buttons */}
         <div style={styles.actions}>
+          {runError && (
+            <div style={{ color: 'var(--danger)', fontSize: 'var(--font-size-xs)', flex: 1 }}>
+              {runError}
+            </div>
+          )}
           <button
             className={`btn ${isRunning ? 'btn-danger' : 'btn-success'}`}
             onClick={handleRun}

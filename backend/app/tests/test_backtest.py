@@ -87,6 +87,18 @@ class _BuySellTrader:
         return orders, 0, ""
 
 
+class _ReadTraderDataTrader:
+    """Returns the incoming traderData so tests can assert initial parameters."""
+
+    def __init__(self):
+        self.first_trader_data: str | None = None
+
+    def run(self, state):
+        if self.first_trader_data is None:
+            self.first_trader_data = state.traderData
+        return {}, 0, state.traderData
+
+
 # ======================================================================
 # Basic backtest run
 # ======================================================================
@@ -131,6 +143,22 @@ class TestBasicBacktestRun:
         assert run.metrics is not None
         assert run.metrics["total_fills"] >= 1
         assert run.metrics["total_orders"] >= 1
+
+    def test_initial_strategy_parameters_seed_trader_data(self):
+        config = BacktestConfig(
+            strategy_id="param_seed",
+            products=["X"],
+            execution_model=ExecutionModel.BALANCED,
+            position_limits={"X": 20},
+            parameters={"spread": 8, "order_size": 3},
+        )
+        engine = BacktestEngine(config)
+        trader = _ReadTraderDataTrader()
+        events = [_make_book_event(100)]
+        run = engine.run(events, trader)
+
+        assert run.status == "completed"
+        assert trader.first_trader_data == '{"spread": 8, "order_size": 3}'
 
 
 # ======================================================================
