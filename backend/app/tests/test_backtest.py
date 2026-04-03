@@ -2,10 +2,10 @@
 
 import pytest
 
-from backend.app.engines.backtest.engine import BacktestEngine
-from backend.app.models.backtest import BacktestConfig, ExecutionModel
-from backend.app.models.events import Event, EventType
-from backend.app.models.market import OrderSide
+from app.engines.backtest.engine import BacktestEngine
+from app.models.backtest import BacktestConfig, ExecutionModel
+from app.models.events import Event, EventType
+from app.models.market import OrderSide
 
 
 # ======================================================================
@@ -56,7 +56,7 @@ class _SimpleBuyTrader:
         self._order_count = 0
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
         orders = {}
         for product in state.order_depths:
             depth = state.order_depths[product]
@@ -73,7 +73,7 @@ class _BuySellTrader:
         self._tick = 0
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
         self._tick += 1
         orders = {}
         for product in state.order_depths:

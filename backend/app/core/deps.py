@@ -2,11 +2,11 @@
 
 from typing import Optional
 
-from backend.app.core.config import settings
-from backend.app.engines.replay.engine import ReplayEngine
-from backend.app.engines.strategies.registry import StrategyRegistry
-from backend.app.services.dataset_service import DatasetService
-from backend.app.storage.database import StorageService
+from app.core.config import settings
+from app.engines.replay.engine import ReplayEngine
+from app.engines.strategies.registry import StrategyRegistry
+from app.services.dataset_service import DatasetService
+from app.storage.database import StorageService
 
 # ---------------------------------------------------------------------------
 # Singletons

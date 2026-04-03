@@ -7,7 +7,7 @@ per-snapshot metrics already exposed by ``VisibleOrderBook``.
 import math
 from typing import Optional
 
-from backend.app.models.market import VisibleOrderBook
+from app.models.market import VisibleOrderBook
 
 
 class BookMetrics:

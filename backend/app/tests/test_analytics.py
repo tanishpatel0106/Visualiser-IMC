@@ -5,10 +5,10 @@ import math
 import numpy as np
 import pytest
 
-from backend.app.engines.analytics.performance import PerformanceAnalyzer
-from backend.app.engines.analytics.indicators import TechnicalIndicators
-from backend.app.models.market import OrderSide
-from backend.app.models.trading import FillEvent, PnLState, PositionState
+from app.engines.analytics.performance import PerformanceAnalyzer
+from app.engines.analytics.indicators import TechnicalIndicators
+from app.models.market import OrderSide
+from app.models.trading import FillEvent, PnLState, PositionState
 
 
 # ======================================================================

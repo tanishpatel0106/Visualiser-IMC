@@ -9,7 +9,7 @@ import bisect
 import uuid
 from typing import Optional
 
-from backend.app.models.events import Event, EventType
+from app.models.events import Event, EventType
 
 
 class ReplayEngine:

@@ -7,8 +7,8 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from backend.app.core.deps import get_dataset_service, get_replay_engine
-from backend.app.services.replay_service import ReplayService
+from app.core.deps import get_dataset_service, get_replay_engine
+from app.services.replay_service import ReplayService
 
 logger = logging.getLogger(__name__)
 

@@ -4,11 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 
-from backend.app.core.deps import get_dataset_service, get_storage
-from backend.app.models.backtest import BacktestConfig
-from backend.app.services.backtest_service import BacktestService
-from backend.app.services.dataset_service import DatasetService
-from backend.app.storage.database import StorageService
+from app.core.deps import get_dataset_service, get_storage
+from app.models.backtest import BacktestConfig
+from app.services.backtest_service import BacktestService
+from app.services.dataset_service import DatasetService
+from app.storage.database import StorageService
 
 router = APIRouter(prefix="/backtest")
 

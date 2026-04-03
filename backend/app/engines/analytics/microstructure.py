@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from backend.app.models.analytics import MicrostructureMetrics
-from backend.app.models.market import OrderSide, TradePrint, VisibleOrderBook
+from app.models.analytics import MicrostructureMetrics
+from app.models.market import OrderSide, TradePrint, VisibleOrderBook
 
 
 class MicrostructureAnalyzer:

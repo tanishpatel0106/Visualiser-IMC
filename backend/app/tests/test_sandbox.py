@@ -2,8 +2,8 @@
 
 import pytest
 
-from backend.app.engines.sandbox.runner import StrategySandbox
-from backend.app.engines.sandbox.adapter import (
+from app.engines.sandbox.runner import StrategySandbox
+from app.engines.sandbox.adapter import (
     ProsperityAdapter,
     TradingState,
     OrderDepth,
@@ -11,7 +11,7 @@ from backend.app.engines.sandbox.adapter import (
     Trade,
     Order,
 )
-from backend.app.models.market import (
+from app.models.market import (
     BookLevel,
     OrderSide,
     TradePrint,

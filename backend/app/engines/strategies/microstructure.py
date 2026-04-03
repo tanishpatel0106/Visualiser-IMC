@@ -11,7 +11,7 @@ import inspect
 import json
 import math
 
-from backend.app.engines.strategies.registry import StrategyDefinition
+from app.engines.strategies.registry import StrategyDefinition
 
 
 # =====================================================================
@@ -61,7 +61,7 @@ class ImbalanceFollower:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -140,7 +140,7 @@ class SpreadCapture:
         self.max_position = 15
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -217,7 +217,7 @@ class TradeburstReaction:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:

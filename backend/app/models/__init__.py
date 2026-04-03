@@ -1,19 +1,19 @@
 """Domain models for the IMC Prosperity trading terminal backend."""
 
-from backend.app.models.analytics import (
+from app.models.analytics import (
     ExecutionMetrics,
     MicrostructureMetrics,
     PerformanceMetrics,
 )
-from backend.app.models.backtest import (
+from app.models.backtest import (
     BacktestConfig,
     BacktestRun,
     ExecutionModel,
     ReplaySession,
     RunArtifact,
 )
-from backend.app.models.events import Event, EventType
-from backend.app.models.market import (
+from app.models.events import Event, EventType
+from app.models.market import (
     BookLevel,
     MarketSnapshot,
     OrderSide,
@@ -23,12 +23,12 @@ from backend.app.models.market import (
     TradePrint,
     VisibleOrderBook,
 )
-from backend.app.models.strategy import (
+from app.models.strategy import (
     DebugFrame,
     StrategyDefinition,
     StrategyParameter,
 )
-from backend.app.models.trading import (
+from app.models.trading import (
     FillEvent,
     InventoryState,
     PnLState,

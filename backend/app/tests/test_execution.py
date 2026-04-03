@@ -2,9 +2,9 @@
 
 import pytest
 
-from backend.app.engines.execution.engine import ExecutionEngine
-from backend.app.models.backtest import ExecutionModel
-from backend.app.models.market import (
+from app.engines.execution.engine import ExecutionEngine
+from app.models.backtest import ExecutionModel
+from app.models.market import (
     BookLevel,
     OrderSide,
     OrderStatus,
@@ -12,7 +12,7 @@ from backend.app.models.market import (
     TradePrint,
     VisibleOrderBook,
 )
-from backend.app.models.trading import StrategyOrder
+from app.models.trading import StrategyOrder
 
 
 # ======================================================================
