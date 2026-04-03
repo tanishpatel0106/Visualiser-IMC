@@ -42,12 +42,27 @@ export const useDatasetStore = create<DatasetStoreState>((set) => ({
   selectedProduct: null,
   selectedDay: null,
   setDatasetInfo: (info) =>
-    set({
-      datasetInfo: info,
-      products: info.products ?? [],
-      days: info.days ?? [],
-      selectedProduct: info.products?.[0] ?? null,
-      selectedDay: info.days?.[0] ?? null,
+    set((prev) => {
+      const products = info.products ?? [];
+      const days = info.days ?? [];
+
+      const selectedProduct =
+        prev.selectedProduct && products.includes(prev.selectedProduct)
+          ? prev.selectedProduct
+          : (products[0] ?? null);
+
+      const selectedDay =
+        prev.selectedDay !== null && days.includes(prev.selectedDay)
+          ? prev.selectedDay
+          : (days[0] ?? null);
+
+      return {
+        datasetInfo: info,
+        products,
+        days,
+        selectedProduct,
+        selectedDay,
+      };
     }),
   setProducts: (products) => set({ products }),
   setDays: (days) => set({ days }),
