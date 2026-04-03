@@ -151,10 +151,11 @@ export function ChartPanel() {
   // Load OHLCV data when product changes
   useEffect(() => {
     if (!selectedProduct) return;
-    api.fetchOHLCV(selectedProduct, 500)
+    const interval = chartMode === 'line' || chartMode === 'step' ? 50 : 500;
+    api.fetchOHLCV(selectedProduct, interval)
       .then(setOhlcv)
       .catch(console.error);
-  }, [selectedProduct, selectedDay, setOhlcv]);
+  }, [selectedProduct, selectedDay, chartMode, setOhlcv]);
 
   // Update series when data or mode changes
   useEffect(() => {
