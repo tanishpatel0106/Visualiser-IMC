@@ -283,9 +283,27 @@ export function ChartPanel() {
 
         const grouped = new Map<string, MarkerAgg>();
 
+        const barTimes = ohlcv.map((bar) => (bar.timestamp / 1000) as Time);
+
+        const snapToNearestBarTime = (rawTs: number): Time => {
+          const target = rawTs / 1000;
+          if (barTimes.length === 0) return target as Time;
+          let best = barTimes[0] as number;
+          let bestDiff = Math.abs(best - target);
+          for (let i = 1; i < barTimes.length; i += 1) {
+            const candidate = barTimes[i] as number;
+            const diff = Math.abs(candidate - target);
+            if (diff < bestDiff) {
+              best = candidate;
+              bestDiff = diff;
+            }
+          }
+          return best as Time;
+        };
+
         for (const f of fills) {
           const side = f.side === 'SELL' ? 'SELL' : 'BUY';
-          const time = ((f.timestamp ?? 0) / 1000) as Time;
+          const time = snapToNearestBarTime(f.timestamp ?? 0);
           const qty = Math.max(0, Number(f.quantity ?? 0));
           const price = Number(f.price ?? 0);
           const key = `${String(time)}_${side}`;
