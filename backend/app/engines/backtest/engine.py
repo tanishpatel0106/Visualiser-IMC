@@ -8,6 +8,7 @@ with debug frames and performance metrics.
 """
 
 import math
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -89,8 +90,8 @@ class BacktestEngine:
         # Reset each tick so the strategy only sees new fills.
         self._own_trades_buffer: dict[str, list[TradePrint]] = {}
 
-        # Strategy trader_data persistence across ticks
-        self._trader_data: str = ""
+        # Strategy trader_data persistence across ticks (seeded with UI parameters)
+        self._trader_data: str = json.dumps(config.parameters or {})
 
     # ------------------------------------------------------------------
     # Main run loop
