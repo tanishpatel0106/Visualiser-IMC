@@ -3,9 +3,9 @@
 import logging
 from typing import Optional
 
-from backend.app.engines.replay.engine import ReplayEngine
-from backend.app.engines.replay.state import ReplayState
-from backend.app.services.dataset_service import DatasetService
+from app.engines.replay.engine import ReplayEngine
+from app.engines.replay.state import ReplayState
+from app.services.dataset_service import DatasetService
 
 logger = logging.getLogger(__name__)
 

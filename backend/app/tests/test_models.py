@@ -2,7 +2,7 @@
 
 import pytest
 
-from backend.app.models.market import (
+from app.models.market import (
     BookLevel,
     MarketSnapshot,
     OrderSide,
@@ -11,16 +11,16 @@ from backend.app.models.market import (
     TradePrint,
     VisibleOrderBook,
 )
-from backend.app.models.events import Event, EventType
-from backend.app.models.trading import (
+from app.models.events import Event, EventType
+from app.models.trading import (
     FillEvent,
     InventoryState,
     PnLState,
     PositionState,
     StrategyOrder,
 )
-from backend.app.models.backtest import BacktestConfig, BacktestRun, ExecutionModel
-from backend.app.models.strategy import DebugFrame, StrategyDefinition, StrategyParameter
+from app.models.backtest import BacktestConfig, BacktestRun, ExecutionModel
+from app.models.strategy import DebugFrame, StrategyDefinition, StrategyParameter
 
 
 # ======================================================================

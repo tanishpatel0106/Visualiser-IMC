@@ -11,7 +11,7 @@ import inspect
 import json
 import math
 
-from backend.app.engines.strategies.registry import StrategyDefinition
+from app.engines.strategies.registry import StrategyDefinition
 
 
 # =====================================================================
@@ -65,7 +65,7 @@ class MidPriceMeanReversion:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -162,7 +162,7 @@ class BollingerBandReversion:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -260,7 +260,7 @@ class ZScoreReversion:
         self.max_position = 20
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:
@@ -357,7 +357,7 @@ class VWAPReversion:
         self.threshold = 1.5
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
 
         trader_data: dict = {}
         if state.traderData:

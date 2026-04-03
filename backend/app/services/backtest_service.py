@@ -4,11 +4,11 @@ import json
 import logging
 from typing import Optional
 
-from backend.app.engines.backtest.engine import BacktestEngine
-from backend.app.engines.sandbox.runner import StrategySandbox
-from backend.app.models.backtest import BacktestConfig, BacktestRun
-from backend.app.services.dataset_service import DatasetService
-from backend.app.storage.database import StorageService
+from app.engines.backtest.engine import BacktestEngine
+from app.engines.sandbox.runner import StrategySandbox
+from app.models.backtest import BacktestConfig, BacktestRun
+from app.services.dataset_service import DatasetService
+from app.storage.database import StorageService
 
 logger = logging.getLogger(__name__)
 

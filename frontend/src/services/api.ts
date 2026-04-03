@@ -14,18 +14,44 @@ import type {
   ReplayStepResponse,
 } from '@/types';
 
-const BASE = '/api';
+const CONFIGURED_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') || '/api';
+let activeBase: string | null = null;
+
+function candidateBases(): string[] {
+  const local = ['http://localhost:8000/api', 'http://127.0.0.1:8000/api'];
+  const configured = [CONFIGURED_BASE];
+  if (typeof window === 'undefined') return [...configured, ...local];
+  const sameOrigin = `${window.location.origin}/api`;
+  return Array.from(new Set([activeBase, ...configured, sameOrigin, ...local].filter(Boolean) as string[]));
+}
+
+export function getActiveApiBase(): string {
+  return activeBase || CONFIGURED_BASE;
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`API error ${res.status}: ${text}`);
+  let lastErr: unknown = null;
+
+  for (const base of candidateBases()) {
+    try {
+      const res = await fetch(`${base}${path}`, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      if (res.ok) {
+        activeBase = base;
+        return res.json();
+      }
+      const text = await res.text();
+      lastErr = new Error(`API error ${res.status} from ${base}: ${text}`);
+    } catch (err) {
+      lastErr = err;
+    }
   }
-  return res.json();
+
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(`API request failed for ${path}`);
 }
 
 // === Health ===
@@ -201,6 +227,7 @@ export async function runStrategy(
     products: string[];
     days: number[];
     execution_model: string;
+    parameters?: Record<string, unknown>;
     position_limits?: Record<string, number>;
     fees?: number;
     slippage?: number;
@@ -229,7 +256,18 @@ export async function compareRuns(runIds: string[]): Promise<{ runs: BacktestRun
 // === WebSocket ===
 
 export function createReplayWebSocket(): WebSocket {
+  const wsBase = (import.meta.env.VITE_WS_BASE_URL as string | undefined)?.replace(/\/+$/, '');
+  if (wsBase) {
+    return new WebSocket(`${wsBase}/ws/replay`);
+  }
+
+  const base = getActiveApiBase();
+  if (base.startsWith('http://') || base.startsWith('https://')) {
+    const wsUrl = `${base}/ws/replay`.replace(/^http/, 'ws');
+    return new WebSocket(wsUrl);
+  }
+
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = window.location.host;
-  return new WebSocket(`${protocol}//${host}/api/ws/replay`);
+  return new WebSocket(`${protocol}//${host}${base}/ws/replay`);
 }

@@ -8,25 +8,26 @@ with debug frames and performance metrics.
 """
 
 import math
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from backend.app.engines.execution.engine import ExecutionEngine
-from backend.app.engines.orderbook.book import OrderBookEngine
-from backend.app.engines.sandbox.adapter import ProsperityAdapter
-from backend.app.engines.sandbox.runner import StrategySandbox
-from backend.app.models.analytics import ExecutionMetrics, PerformanceMetrics
-from backend.app.models.backtest import BacktestConfig, BacktestRun, ExecutionModel
-from backend.app.models.events import Event, EventType
-from backend.app.models.market import (
+from app.engines.execution.engine import ExecutionEngine
+from app.engines.orderbook.book import OrderBookEngine
+from app.engines.sandbox.adapter import ProsperityAdapter
+from app.engines.sandbox.runner import StrategySandbox
+from app.models.analytics import ExecutionMetrics, PerformanceMetrics
+from app.models.backtest import BacktestConfig, BacktestRun, ExecutionModel
+from app.models.events import Event, EventType
+from app.models.market import (
     MarketSnapshot,
     OrderSide,
     TradePrint,
     VisibleOrderBook,
 )
-from backend.app.models.strategy import DebugFrame
-from backend.app.models.trading import (
+from app.models.strategy import DebugFrame
+from app.models.trading import (
     FillEvent,
     InventoryState,
     PnLState,
@@ -89,8 +90,8 @@ class BacktestEngine:
         # Reset each tick so the strategy only sees new fills.
         self._own_trades_buffer: dict[str, list[TradePrint]] = {}
 
-        # Strategy trader_data persistence across ticks
-        self._trader_data: str = ""
+        # Strategy trader_data persistence across ticks (seeded with UI parameters)
+        self._trader_data: str = json.dumps(config.parameters or {})
 
     # ------------------------------------------------------------------
     # Main run loop

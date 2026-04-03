@@ -8,7 +8,7 @@ from typing import Optional
 
 import pandas as pd
 
-from backend.app.models.market import MarketSnapshot, TradePrint
+from app.models.market import MarketSnapshot, TradePrint
 
 logger = logging.getLogger(__name__)
 

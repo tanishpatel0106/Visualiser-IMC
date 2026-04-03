@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 
-from backend.app.models.market import OrderSide, OrderStatus, OrderType
+from app.models.market import OrderSide, OrderStatus, OrderType
 
 
 class StrategyOrder(BaseModel):

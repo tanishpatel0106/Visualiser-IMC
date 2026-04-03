@@ -2,10 +2,10 @@
 
 import pytest
 
-from backend.app.engines.backtest.engine import BacktestEngine
-from backend.app.models.backtest import BacktestConfig, ExecutionModel
-from backend.app.models.events import Event, EventType
-from backend.app.models.market import OrderSide
+from app.engines.backtest.engine import BacktestEngine
+from app.models.backtest import BacktestConfig, ExecutionModel
+from app.models.events import Event, EventType
+from app.models.market import OrderSide
 
 
 # ======================================================================
@@ -56,7 +56,7 @@ class _SimpleBuyTrader:
         self._order_count = 0
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
         orders = {}
         for product in state.order_depths:
             depth = state.order_depths[product]
@@ -73,7 +73,7 @@ class _BuySellTrader:
         self._tick = 0
 
     def run(self, state):
-        from backend.app.engines.sandbox.adapter import Order
+        from app.engines.sandbox.adapter import Order
         self._tick += 1
         orders = {}
         for product in state.order_depths:
@@ -85,6 +85,18 @@ class _BuySellTrader:
                 best_bid = max(depth.buy_orders.keys())
                 orders[product] = [Order(product, best_bid, -1)]  # sell
         return orders, 0, ""
+
+
+class _ReadTraderDataTrader:
+    """Returns the incoming traderData so tests can assert initial parameters."""
+
+    def __init__(self):
+        self.first_trader_data: str | None = None
+
+    def run(self, state):
+        if self.first_trader_data is None:
+            self.first_trader_data = state.traderData
+        return {}, 0, state.traderData
 
 
 # ======================================================================
@@ -131,6 +143,22 @@ class TestBasicBacktestRun:
         assert run.metrics is not None
         assert run.metrics["total_fills"] >= 1
         assert run.metrics["total_orders"] >= 1
+
+    def test_initial_strategy_parameters_seed_trader_data(self):
+        config = BacktestConfig(
+            strategy_id="param_seed",
+            products=["X"],
+            execution_model=ExecutionModel.BALANCED,
+            position_limits={"X": 20},
+            parameters={"spread": 8, "order_size": 3},
+        )
+        engine = BacktestEngine(config)
+        trader = _ReadTraderDataTrader()
+        events = [_make_book_event(100)]
+        run = engine.run(events, trader)
+
+        assert run.status == "completed"
+        assert trader.first_trader_data == '{"spread": 8, "order_size": 3}'
 
 
 # ======================================================================

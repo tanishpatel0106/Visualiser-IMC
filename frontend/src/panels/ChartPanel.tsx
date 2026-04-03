@@ -59,6 +59,7 @@ export function ChartPanel() {
   const chartRef = useRef<IChartApi | null>(null);
   const mainSeriesRef = useRef<ISeriesApi<'Candlestick'> | ISeriesApi<'Line'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const indicatorSeriesRefs = useRef<ISeriesApi<'Line'>[]>([]);
 
   const { selectedProduct, selectedDay } = useDatasetStore();
   const { ohlcv, fills, setOhlcv } = useBacktestStore();
@@ -169,6 +170,10 @@ export function ChartPanel() {
       try { chart.removeSeries(volumeSeriesRef.current as any); } catch { /* ignore */ }
       volumeSeriesRef.current = null;
     }
+    indicatorSeriesRefs.current.forEach((s) => {
+      try { chart.removeSeries(s as any); } catch { /* ignore */ }
+    });
+    indicatorSeriesRefs.current = [];
 
     if (!ohlcv || ohlcv.length === 0) return;
 
@@ -228,6 +233,43 @@ export function ChartPanel() {
       console.error('Failed to add volume series:', e);
     }
 
+    // Indicator overlays
+    const times = ohlcv.map((bar) => (bar.timestamp / 1000) as Time);
+    const closes = ohlcv.map((bar) => bar.close);
+    const volumes = ohlcv.map((bar) => bar.volume);
+
+    if (selectedIndicators.includes('SMA20')) {
+      const sma20 = rollingSma(closes, 20);
+      const series = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, priceLineVisible: false });
+      series.setData(times.flatMap((time, i) => (sma20[i] == null ? [] : [{ time, value: sma20[i] as number }])));
+      indicatorSeriesRefs.current.push(series);
+    }
+
+    if (selectedIndicators.includes('SMA50')) {
+      const sma50 = rollingSma(closes, 50);
+      const series = chart.addLineSeries({ color: '#8b5cf6', lineWidth: 1, priceLineVisible: false });
+      series.setData(times.flatMap((time, i) => (sma50[i] == null ? [] : [{ time, value: sma50[i] as number }])));
+      indicatorSeriesRefs.current.push(series);
+    }
+
+    if (selectedIndicators.includes('VWAP')) {
+      const vwap = cumulativeVwap(closes, volumes);
+      const series = chart.addLineSeries({ color: '#22d3ee', lineWidth: 1, lineStyle: 2, priceLineVisible: false });
+      series.setData(times.map((time, i) => ({ time, value: vwap[i] })));
+      indicatorSeriesRefs.current.push(series);
+    }
+
+    if (selectedIndicators.includes('BB')) {
+      const { mid, upper, lower } = bollingerBands(closes, 20, 2);
+      const midSeries = chart.addLineSeries({ color: '#a3a3a3', lineWidth: 1, priceLineVisible: false });
+      midSeries.setData(times.flatMap((time, i) => (mid[i] == null ? [] : [{ time, value: mid[i] as number }])));
+      const upperSeries = chart.addLineSeries({ color: '#f97316', lineWidth: 1, priceLineVisible: false });
+      upperSeries.setData(times.flatMap((time, i) => (upper[i] == null ? [] : [{ time, value: upper[i] as number }])));
+      const lowerSeries = chart.addLineSeries({ color: '#f97316', lineWidth: 1, priceLineVisible: false });
+      lowerSeries.setData(times.flatMap((time, i) => (lower[i] == null ? [] : [{ time, value: lower[i] as number }])));
+      indicatorSeriesRefs.current.push(midSeries, upperSeries, lowerSeries);
+    }
+
     // Add fill markers if available
     if (fills && fills.length > 0 && mainSeriesRef.current) {
       try {
@@ -245,7 +287,7 @@ export function ChartPanel() {
     }
 
     try { chart.timeScale().fitContent(); } catch { /* ignore */ }
-  }, [ohlcv, chartMode, fills]);
+  }, [ohlcv, chartMode, fills, selectedIndicators]);
 
   return (
     <div className="panel" style={{ height: '100%' }}>
@@ -286,4 +328,52 @@ export function ChartPanel() {
       </div>
     </div>
   );
+}
+
+function rollingSma(values: number[], period: number): Array<number | null> {
+  const out: Array<number | null> = new Array(values.length).fill(null);
+  let sum = 0;
+  for (let i = 0; i < values.length; i += 1) {
+    sum += values[i];
+    if (i >= period) sum -= values[i - period];
+    if (i >= period - 1) out[i] = sum / period;
+  }
+  return out;
+}
+
+function cumulativeVwap(prices: number[], volumes: number[]): number[] {
+  const out: number[] = [];
+  let pv = 0;
+  let vol = 0;
+  for (let i = 0; i < prices.length; i += 1) {
+    pv += prices[i] * (volumes[i] || 0);
+    vol += volumes[i] || 0;
+    out.push(vol > 0 ? pv / vol : prices[i]);
+  }
+  return out;
+}
+
+function bollingerBands(values: number[], period: number, k: number): {
+  mid: Array<number | null>;
+  upper: Array<number | null>;
+  lower: Array<number | null>;
+} {
+  const mid = rollingSma(values, period);
+  const upper: Array<number | null> = new Array(values.length).fill(null);
+  const lower: Array<number | null> = new Array(values.length).fill(null);
+
+  for (let i = period - 1; i < values.length; i += 1) {
+    const m = mid[i];
+    if (m == null) continue;
+    let variance = 0;
+    for (let j = i - period + 1; j <= i; j += 1) {
+      const d = values[j] - m;
+      variance += d * d;
+    }
+    const std = Math.sqrt(variance / period);
+    upper[i] = m + k * std;
+    lower[i] = m - k * std;
+  }
+
+  return { mid, upper, lower };
 }

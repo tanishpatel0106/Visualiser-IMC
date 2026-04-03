@@ -4,11 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from backend.app.core.config import settings
-from backend.app.core.deps import get_dataset_service, get_replay_engine
-from backend.app.engines.replay.engine import ReplayEngine
-from backend.app.services.dataset_service import DatasetService
-from backend.app.services.replay_service import ReplayService
+from app.core.config import settings
+from app.core.deps import get_dataset_service, get_replay_engine
+from app.engines.replay.engine import ReplayEngine
+from app.services.dataset_service import DatasetService
+from app.services.replay_service import ReplayService
 
 router = APIRouter(prefix="/replay")
 

@@ -5,12 +5,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from backend.app.engines.backtest.engine import BacktestEngine
-from backend.app.engines.sandbox.runner import StrategySandbox
-from backend.app.engines.strategies.registry import StrategyRegistry
-from backend.app.models.backtest import BacktestConfig, BacktestRun
-from backend.app.services.dataset_service import DatasetService
-from backend.app.storage.database import StorageService
+from app.engines.backtest.engine import BacktestEngine
+from app.engines.sandbox.runner import StrategySandbox
+from app.engines.strategies.registry import StrategyRegistry
+from app.models.backtest import BacktestConfig, BacktestRun
+from app.services.dataset_service import DatasetService
+from app.storage.database import StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,7 @@ class StrategyService:
             fees=config.get("fees", 0.0),
             slippage=config.get("slippage", 0.0),
             initial_cash=config.get("initial_cash", 0.0),
+            parameters=config.get("parameters", {}),
         )
 
         # Get event stream
