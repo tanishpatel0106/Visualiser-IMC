@@ -57,6 +57,16 @@ class TestStrategiesEndpoint:
         assert "strategies" in data
         assert isinstance(data["strategies"], list)
 
+    def test_built_in_strategy_parameters_include_names(self, client):
+        response = client.get("/api/strategies")
+        assert response.status_code == 200
+        strategies = response.json().get("strategies", [])
+        fixed = next((s for s in strategies if s.get("strategy_id") == "fixed_spread_maker"), None)
+        assert fixed is not None
+        params = fixed.get("parameters", [])
+        assert isinstance(params, list) and params
+        assert all("name" in p for p in params if isinstance(p, dict))
+
 
 # ======================================================================
 # POST /api/replay/start
