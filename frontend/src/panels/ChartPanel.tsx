@@ -273,13 +273,49 @@ export function ChartPanel() {
     // Add fill markers if available
     if (fills && fills.length > 0 && mainSeriesRef.current) {
       try {
-        const markers = fills.map((f) => ({
-          time: ((f.timestamp ?? 0) / 1000) as Time,
-          position: (f.side === 'BUY' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
-          color: f.side === 'BUY' ? '#10b981' : '#ef4444',
-          shape: (f.side === 'BUY' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
-          text: `${f.side ?? '?'} ${f.quantity}@${(f.price ?? 0).toFixed(1)}`,
-        }));
+        type MarkerAgg = {
+          time: Time;
+          side: 'BUY' | 'SELL';
+          count: number;
+          totalQty: number;
+          weightedPriceNumerator: number;
+        };
+
+        const grouped = new Map<string, MarkerAgg>();
+
+        for (const f of fills) {
+          const side = f.side === 'SELL' ? 'SELL' : 'BUY';
+          const time = ((f.timestamp ?? 0) / 1000) as Time;
+          const qty = Math.max(0, Number(f.quantity ?? 0));
+          const price = Number(f.price ?? 0);
+          const key = `${String(time)}_${side}`;
+          const existing = grouped.get(key);
+
+          if (existing) {
+            existing.count += 1;
+            existing.totalQty += qty;
+            existing.weightedPriceNumerator += price * qty;
+          } else {
+            grouped.set(key, {
+              time,
+              side,
+              count: 1,
+              totalQty: qty,
+              weightedPriceNumerator: price * qty,
+            });
+          }
+        }
+
+        const markers = Array.from(grouped.values()).map((m) => {
+          const avgPrice = m.totalQty > 0 ? m.weightedPriceNumerator / m.totalQty : 0;
+          return {
+            time: m.time,
+            position: (m.side === 'BUY' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+            color: m.side === 'BUY' ? '#10b981' : '#ef4444',
+            shape: (m.side === 'BUY' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+            text: `${m.side} ${m.totalQty}@${avgPrice.toFixed(1)}${m.count > 1 ? ` x${m.count}` : ''}`,
+          };
+        });
         (mainSeriesRef.current as any).setMarkers(markers.sort((a: any, b: any) => (a.time as number) - (b.time as number)));
       } catch (e) {
         console.error('Failed to set markers:', e);
