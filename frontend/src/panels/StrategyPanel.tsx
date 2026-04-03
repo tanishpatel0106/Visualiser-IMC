@@ -156,8 +156,9 @@ export function StrategyPanel() {
     }
   };
 
-  const handleRun = async () => {
-    if (!selectedStrategy) {
+  const handleRun = async (strategyOverride?: StrategyDefinition) => {
+    const strategyToRun = strategyOverride ?? selectedStrategy;
+    if (!strategyToRun) {
       setRunError('Select a strategy first.');
       return;
     }
@@ -172,7 +173,7 @@ export function StrategyPanel() {
       if (selectedProduct) {
         positionLimits[selectedProduct] = posLimit;
       }
-      const run = await api.runStrategy(selectedStrategy.strategy_id, {
+      const run = await api.runStrategy(strategyToRun.strategy_id, {
         products: selectedProduct ? [selectedProduct] : products,
         days: selectedDay !== null ? [selectedDay] : days,
         execution_model: execModel,
@@ -264,7 +265,7 @@ export function StrategyPanel() {
                         className="btn btn-sm btn-success"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleSelectStrategy(s).then(handleRun);
+                          handleSelectStrategy(s).then(() => handleRun(s));
                         }}
                         style={{ padding: '1px 4px', fontSize: 9 }}
                       >
@@ -370,7 +371,7 @@ export function StrategyPanel() {
           )}
           <button
             className={`btn ${isRunning ? 'btn-danger' : 'btn-success'}`}
-            onClick={handleRun}
+            onClick={() => handleRun()}
             disabled={!selectedStrategy || isRunning}
             style={{ flex: 1 }}
           >

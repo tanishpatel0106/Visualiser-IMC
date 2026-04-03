@@ -1,5 +1,6 @@
 """Application configuration using pydantic-settings."""
 
+from pathlib import Path
 from typing import Any
 
 from pydantic import field_validator
@@ -28,6 +29,20 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [v.strip() for v in value.split(",") if v.strip()]
         return value
+
+    @field_validator("data_directory", "storage_path", mode="after")
+    @classmethod
+    def _resolve_project_relative_paths(cls, value: str) -> str:
+        """Resolve relative paths from the repository root.
+
+        This keeps paths stable regardless of where uvicorn is started from
+        (repo root, backend/, systemd unit, etc.).
+        """
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return str(path)
+        repo_root = Path(__file__).resolve().parents[3]
+        return str((repo_root / path).resolve())
 
     model_config = {"env_prefix": "IMC_"}
 
