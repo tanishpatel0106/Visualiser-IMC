@@ -127,11 +127,12 @@ export async function fetchIndicators(
 
 export async function startReplay(
   products: string[],
-  days: number[]
+  days: number[],
+  strategyId?: string | null,
 ): Promise<ReplaySession> {
   return request<ReplaySession>('/replay/start', {
     method: 'POST',
-    body: JSON.stringify({ products, days }),
+    body: JSON.stringify({ products, days, strategy_id: strategyId || null }),
   });
 }
 

@@ -109,7 +109,8 @@ export function Header() {
         try {
           const session = await api.startReplay(
             [selectedProduct],
-            selectedDay !== null ? [selectedDay] : []
+            selectedDay !== null ? [selectedDay] : [],
+            selectedStrategy?.strategy_id ?? null,
           );
           useReplayStore.getState().resetReplay();
           useReplayStore.getState().setSessionId(session.session_id);

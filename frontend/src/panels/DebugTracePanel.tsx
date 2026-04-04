@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { useBacktestStore } from '@/store';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { useBacktestStore, useReplayStore } from '@/store';
 import * as api from '@/services/api';
 import type { DebugFrame, EventType } from '@/types';
 
@@ -91,9 +91,12 @@ function formatTime(ts: number): string {
 
 export function DebugTracePanel() {
   const { currentRun, trace, setTrace } = useBacktestStore();
+  const { replayTrace, isPlaying } = useReplayStore();
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const [filterType, setFilterType] = useState<EventType | 'ALL'>('ALL');
   const [search, setSearch] = useState('');
+  const [autoScroll, setAutoScroll] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!currentRun || currentRun.status !== 'completed') return;
@@ -104,8 +107,21 @@ export function DebugTracePanel() {
     }).catch(console.error);
   }, [currentRun, setTrace]);
 
+  // Merge backtest trace and replay trace — replay takes priority during active replay
+  const activeTrace = useMemo(() => {
+    if (replayTrace.length > 0) return replayTrace;
+    return trace ?? [];
+  }, [trace, replayTrace]);
+
+  // Auto-scroll to bottom when new frames arrive during replay
+  useEffect(() => {
+    if (autoScroll && scrollRef.current && replayTrace.length > 0) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [replayTrace.length, autoScroll]);
+
   const filtered = useMemo(() => {
-    return (trace ?? []).filter((f) => {
+    return activeTrace.filter((f) => {
       if (filterType !== 'ALL' && f.event_type !== filterType) return false;
       if (search) {
         const s = search.toLowerCase();
@@ -117,10 +133,12 @@ export function DebugTracePanel() {
       }
       return true;
     });
-  }, [trace, filterType, search]);
+  }, [activeTrace, filterType, search]);
 
-  if (!trace || trace.length === 0) {
-    return <div style={styles.empty}>Run a backtest to view debug trace</div>;
+  const isLive = replayTrace.length > 0;
+
+  if (activeTrace.length === 0) {
+    return <div style={styles.empty}>{isPlaying ? 'Waiting for strategy events...' : 'Run a backtest or start replay with a strategy to view debug trace'}</div>;
   }
 
   return (
@@ -145,8 +163,15 @@ export function DebugTracePanel() {
           onChange={(e) => setSearch(e.target.value)}
           style={{ width: 150 }}
         />
-        <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-dim)', marginLeft: 'auto' }}>
-          {filtered.length}/{trace.length} frames
+        {isLive && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} style={{ accentColor: 'var(--cyan)', width: 10, height: 10 }} />
+            Auto-scroll
+          </label>
+        )}
+        <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-dim)', marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+          {isLive && <span className="badge badge-green" style={{ fontSize: 8, padding: '1px 4px' }}>LIVE</span>}
+          {filtered.length}/{activeTrace.length} frames
         </span>
       </div>
 
@@ -162,7 +187,7 @@ export function DebugTracePanel() {
       </div>
 
       {/* Trace rows */}
-      <div style={styles.container}>
+      <div style={styles.container} ref={scrollRef}>
         {filtered.map((frame, i) => {
           const isExpanded = expandedIdx === i;
           const pnlVal = frame.pnl?.total_pnl ?? 0;
