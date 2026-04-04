@@ -183,11 +183,25 @@ export async function getBacktestRun(runId: string): Promise<BacktestRun> {
 }
 
 export async function getBacktestMetrics(runId: string): Promise<PerformanceMetrics> {
-  return request<PerformanceMetrics>(`/backtest/${runId}/metrics`);
+  const res = await request<Record<string, unknown>>(`/backtest/${runId}/metrics`);
+  if (res.performance && typeof res.performance === 'object') {
+    const perf = res.performance as Record<string, unknown>;
+    const exec = (res.execution && typeof res.execution === 'object')
+      ? (res.execution as Record<string, unknown>)
+      : {};
+    return { ...perf, ...exec } as PerformanceMetrics;
+  }
+  return res as PerformanceMetrics;
 }
 
 export async function getBacktestTrace(runId: string): Promise<{ trace: DebugFrame[]; page: number; total_pages: number }> {
-  return request(`/backtest/${runId}/trace`);
+  const res = await request<Record<string, unknown>>(`/backtest/${runId}/trace`);
+  const trace = (res.trace as DebugFrame[] | undefined) ?? (res.frames as DebugFrame[] | undefined) ?? [];
+  return {
+    trace,
+    page: (res.offset as number | undefined) ?? 0,
+    total_pages: 1,
+  };
 }
 
 export async function getBacktestFills(runId: string): Promise<{ fills: FillEvent[] }> {

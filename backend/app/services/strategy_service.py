@@ -61,6 +61,31 @@ class StrategyService:
     # Listing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalise_parameters(parameters: object) -> list[dict]:
+        """Convert strategy parameter metadata to a frontend-friendly list.
+
+        Built-in strategies define parameters as a dict keyed by parameter name.
+        Frontend expects each parameter item to include its own ``name`` field.
+        """
+        if isinstance(parameters, list):
+            normalised: list[dict] = []
+            for item in parameters:
+                if isinstance(item, dict):
+                    normalised.append(item)
+            return normalised
+
+        if isinstance(parameters, dict):
+            normalised = []
+            for name, spec in parameters.items():
+                if isinstance(spec, dict):
+                    normalised.append({"name": name, **spec})
+                else:
+                    normalised.append({"name": name, "type": "string", "default": spec})
+            return normalised
+
+        return []
+
     def get_all_strategies(self) -> list[dict]:
         """Return all strategies: built-in (from registry) + uploaded (from storage)."""
         strategies: list[dict] = []
@@ -73,7 +98,7 @@ class StrategyService:
                 "category": sdef.category,
                 "description": sdef.description,
                 "is_builtin": True,
-                "parameters": sdef.parameters if isinstance(sdef.parameters, list) else list(sdef.parameters.values()),
+                "parameters": self._normalise_parameters(sdef.parameters),
             })
 
         # Uploaded strategies from the database
@@ -94,7 +119,7 @@ class StrategyService:
                 "category": builtin.category,
                 "description": builtin.description,
                 "is_builtin": True,
-                "parameters": builtin.parameters if isinstance(builtin.parameters, list) else list(builtin.parameters.values()),
+                "parameters": self._normalise_parameters(builtin.parameters),
             }
 
         # Check storage

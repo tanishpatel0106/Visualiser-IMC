@@ -111,6 +111,7 @@ export function Header() {
             [selectedProduct],
             selectedDay !== null ? [selectedDay] : []
           );
+          useReplayStore.getState().resetReplay();
           useReplayStore.getState().setSessionId(session.session_id);
           if (session.total_events) {
             useReplayStore.setState({ totalEvents: session.total_events });
@@ -126,8 +127,14 @@ export function Header() {
   const handleStep = async () => {
     try {
       const resp = await api.stepReplay();
-      if (resp?.state) {
-        useReplayStore.getState().updateFromStepResponse(resp.state);
+      const payload = resp as unknown as Record<string, unknown>;
+      if (payload?.state) {
+        useReplayStore.getState().updateFromStepResponse(payload.state as Record<string, unknown>);
+        useReplayStore.getState().updateReplayState({
+          current_timestamp: (payload.current_timestamp as number) ?? 0,
+          current_index: (payload.current_index as number) ?? 0,
+          total_events: (payload.total_events as number) ?? totalEvents,
+        });
       }
     } catch (err) {
       console.error(err);
@@ -137,8 +144,14 @@ export function Header() {
   const handleStepBack = async () => {
     try {
       const resp = await api.stepBackReplay();
-      if (resp?.state) {
-        useReplayStore.getState().updateFromStepResponse(resp.state);
+      const payload = resp as unknown as Record<string, unknown>;
+      if (payload?.state) {
+        useReplayStore.getState().updateFromStepResponse(payload.state as Record<string, unknown>);
+        useReplayStore.getState().updateReplayState({
+          current_timestamp: (payload.current_timestamp as number) ?? 0,
+          current_index: (payload.current_index as number) ?? 0,
+          total_events: (payload.total_events as number) ?? totalEvents,
+        });
       }
     } catch (err) {
       console.error(err);

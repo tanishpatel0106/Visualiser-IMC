@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { TerminalLayout } from '@/layouts/TerminalLayout';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useWebSocket } from '@/hooks/useWebSocket';
-import { useDatasetStore, useStrategyStore } from '@/store';
+import { useDatasetStore, useReplayStore, useStrategyStore } from '@/store';
 import * as api from '@/services/api';
+import type { PnLState, PositionState, TradePrint, VisibleOrderBook } from '@/types';
 
 export function App() {
   useKeyboardShortcuts();
@@ -11,6 +12,10 @@ export function App() {
 
   const setDatasetInfo = useDatasetStore((s) => s.setDatasetInfo);
   const setStrategies = useStrategyStore((s) => s.setStrategies);
+  const isPlaying = useReplayStore((s) => s.isPlaying);
+  const speed = useReplayStore((s) => s.speed);
+  const updateReplayState = useReplayStore((s) => s.updateReplayState);
+  const setPlaying = useReplayStore((s) => s.setPlaying);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -42,6 +47,58 @@ export function App() {
       clearInterval(timer);
     };
   }, [setDatasetInfo, setStrategies]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveErrors = 0;
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const resp = await api.stepReplay();
+        if (cancelled) return;
+
+        const payload = resp as unknown as Record<string, unknown>;
+        const state = (payload.state ?? {}) as Record<string, unknown>;
+        updateReplayState({
+          books: (state.books ?? {}) as Record<string, VisibleOrderBook>,
+          trades: (state.trades ?? []) as TradePrint[],
+          positions: (state.positions ?? {}) as Record<string, PositionState>,
+          pnl: (state.pnl ?? undefined) as PnLState | undefined,
+          current_timestamp: (payload.current_timestamp as number) ?? 0,
+          current_index: (payload.current_index as number) ?? 0,
+          total_events: (payload.total_events as number) ?? 0,
+        });
+        consecutiveErrors = 0;
+
+        if (payload.done) {
+          setPlaying(false);
+          return;
+        }
+
+        const delayMs = Math.max(20, Math.round(120 / Math.max(speed, 0.1)));
+        timer = setTimeout(tick, delayMs);
+      } catch (err) {
+        console.error('Replay step failed:', err);
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= 5) {
+          setPlaying(false);
+          return;
+        }
+        timer = setTimeout(tick, 300);
+      }
+    };
+
+    tick();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [isPlaying, speed, setPlaying, updateReplayState]);
 
   return (
     <>

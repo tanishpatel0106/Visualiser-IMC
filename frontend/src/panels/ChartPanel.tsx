@@ -54,6 +54,20 @@ const CHART_MODES: { key: ChartMode; label: string }[] = [
   { key: 'ohlc', label: 'OHLC' },
 ];
 
+/**
+ * Convert a relative IMC Prosperity timestamp (0–999900) into a
+ * UTC seconds value that lightweight-charts can display properly.
+ * We anchor to a fake base date so the time axis shows readable
+ * "HH:MM" labels rather than 1970 epoch garbage.
+ */
+const BASE_UTC = Date.UTC(2025, 0, 1, 9, 0, 0) / 1000; // 2025-01-01 09:00 UTC in seconds
+function toChartTime(ts: number): Time {
+  // Prosperity timestamps are ~milliseconds within a trading day (0–1,000,000).
+  // Map them into a 6-hour trading window so the chart shows 09:00 → 15:00.
+  // 1,000,000 ticks → 21,600 seconds (6 hours)
+  return (BASE_UTC + Math.round(ts * 21.6 / 1000)) as Time;
+}
+
 export function ChartPanel() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -151,10 +165,11 @@ export function ChartPanel() {
   // Load OHLCV data when product changes
   useEffect(() => {
     if (!selectedProduct) return;
-    api.fetchOHLCV(selectedProduct, 500)
+    const interval = chartMode === 'line' || chartMode === 'step' ? 500 : 5000;
+    api.fetchOHLCV(selectedProduct, interval)
       .then(setOhlcv)
       .catch(console.error);
-  }, [selectedProduct, selectedDay, setOhlcv]);
+  }, [selectedProduct, selectedDay, chartMode, setOhlcv]);
 
   // Update series when data or mode changes
   useEffect(() => {
@@ -188,7 +203,7 @@ export function ChartPanel() {
         wickDownColor: '#ef4444',
       });
       const data = ohlcv.map((bar) => ({
-        time: (bar.timestamp / 1000) as Time,
+        time: toChartTime(bar.timestamp),
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -206,7 +221,7 @@ export function ChartPanel() {
         crosshairMarkerBackgroundColor: '#0a0e17',
       });
       const data = ohlcv.map((bar) => ({
-        time: (bar.timestamp / 1000) as Time,
+        time: toChartTime(bar.timestamp),
         value: bar.close,
       }));
       try { series.setData(data); } catch (e) { console.error('Failed to set line data:', e); }
@@ -223,7 +238,7 @@ export function ChartPanel() {
         scaleMargins: { top: 0.8, bottom: 0 },
       });
       const volData = ohlcv.map((bar) => ({
-        time: (bar.timestamp / 1000) as Time,
+        time: toChartTime(bar.timestamp),
         value: bar.volume,
         color: bar.close >= bar.open ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)',
       }));
@@ -234,7 +249,7 @@ export function ChartPanel() {
     }
 
     // Indicator overlays
-    const times = ohlcv.map((bar) => (bar.timestamp / 1000) as Time);
+    const times = ohlcv.map((bar) => toChartTime(bar.timestamp));
     const closes = ohlcv.map((bar) => bar.close);
     const volumes = ohlcv.map((bar) => bar.volume);
 
@@ -273,13 +288,67 @@ export function ChartPanel() {
     // Add fill markers if available
     if (fills && fills.length > 0 && mainSeriesRef.current) {
       try {
-        const markers = fills.map((f) => ({
-          time: ((f.timestamp ?? 0) / 1000) as Time,
-          position: (f.side === 'BUY' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
-          color: f.side === 'BUY' ? '#10b981' : '#ef4444',
-          shape: (f.side === 'BUY' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
-          text: `${f.side ?? '?'} ${f.quantity}@${(f.price ?? 0).toFixed(1)}`,
-        }));
+        type MarkerAgg = {
+          time: Time;
+          side: 'BUY' | 'SELL';
+          count: number;
+          totalQty: number;
+          weightedPriceNumerator: number;
+        };
+
+        const grouped = new Map<string, MarkerAgg>();
+
+        const barTimes = ohlcv.map((bar) => toChartTime(bar.timestamp));
+
+        const snapToNearestBarTime = (rawTs: number): Time => {
+          const target = toChartTime(rawTs) as number;
+          if (barTimes.length === 0) return target as Time;
+          let best = barTimes[0] as number;
+          let bestDiff = Math.abs(best - target);
+          for (let i = 1; i < barTimes.length; i += 1) {
+            const candidate = barTimes[i] as number;
+            const diff = Math.abs(candidate - target);
+            if (diff < bestDiff) {
+              best = candidate;
+              bestDiff = diff;
+            }
+          }
+          return best as Time;
+        };
+
+        for (const f of fills) {
+          const side = f.side === 'SELL' ? 'SELL' : 'BUY';
+          const time = snapToNearestBarTime(f.timestamp ?? 0);
+          const qty = Math.max(0, Number(f.quantity ?? 0));
+          const price = Number(f.price ?? 0);
+          const key = `${String(time)}_${side}`;
+          const existing = grouped.get(key);
+
+          if (existing) {
+            existing.count += 1;
+            existing.totalQty += qty;
+            existing.weightedPriceNumerator += price * qty;
+          } else {
+            grouped.set(key, {
+              time,
+              side,
+              count: 1,
+              totalQty: qty,
+              weightedPriceNumerator: price * qty,
+            });
+          }
+        }
+
+        const markers = Array.from(grouped.values()).map((m) => {
+          return {
+            time: m.time,
+            position: (m.side === 'BUY' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+            color: m.side === 'BUY' ? '#10b981' : '#ef4444',
+            shape: (m.side === 'BUY' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+            size: 1,
+            text: m.totalQty > 1 ? `${m.totalQty}` : '',
+          };
+        });
         (mainSeriesRef.current as any).setMarkers(markers.sort((a: any, b: any) => (a.time as number) - (b.time as number)));
       } catch (e) {
         console.error('Failed to set markers:', e);
@@ -302,7 +371,14 @@ export function ChartPanel() {
             {m.label}
           </button>
         ))}
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, alignItems: 'center' }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          {fills && fills.length > 0 && (
+            <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 'var(--font-size-xs)', marginRight: 4 }}>
+              <span style={{ color: '#10b981' }}>▲ Buy</span>
+              <span style={{ color: '#ef4444' }}>▼ Sell</span>
+              <span style={{ color: 'var(--text-dim)' }}>({fills.length} fills)</span>
+            </span>
+          )}
           <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>INDICATORS:</span>
           {['SMA20', 'SMA50', 'VWAP', 'BB'].map((ind) => (
             <label key={ind} style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', cursor: 'pointer' }}>
