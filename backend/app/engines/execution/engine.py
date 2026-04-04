@@ -183,6 +183,19 @@ class ExecutionEngine:
 
             fill_qty = min(fill_qty, order.remaining_quantity)
 
+            # Enforce position limits on passive fills too
+            limit = self._position_limits.get(order.product)
+            if limit is not None:
+                current_pos = self.get_position(order.product)
+                if order.side == OrderSide.BUY:
+                    max_buy = max(0, limit - current_pos)
+                    fill_qty = min(fill_qty, max_buy)
+                else:
+                    max_sell = max(0, limit + current_pos)
+                    fill_qty = min(fill_qty, max_sell)
+                if fill_qty <= 0:
+                    continue
+
             fill = FillEvent(
                 order_id=order.order_id,
                 product=order.product,
@@ -193,6 +206,14 @@ class ExecutionEngine:
                 is_aggressive=False,
             )
             fills.append(fill)
+
+            # Update internal position so subsequent fills in this loop
+            # respect the updated position for limit checks.
+            current_pos = self.get_position(order.product)
+            if order.side == OrderSide.BUY:
+                self._positions[order.product] = current_pos + fill_qty
+            else:
+                self._positions[order.product] = current_pos - fill_qty
 
             # Update the order state
             order.filled_quantity += fill_qty
@@ -219,6 +240,22 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
     # Order cancellation
     # ------------------------------------------------------------------
+
+    def cancel_all_resting(self, products: list[str]) -> None:
+        """Cancel all resting orders for the given products.
+
+        In IMC Prosperity, each strategy tick's output replaces all
+        previous resting orders — there is no persistent order book
+        between ticks. This method implements that semantic.
+        """
+        to_remove = [
+            oid for oid, o in self._resting_orders.items()
+            if o.product in products
+        ]
+        for oid in to_remove:
+            order = self._resting_orders.pop(oid, None)
+            if order is not None:
+                order.status = OrderStatus.CANCELLED
 
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a resting order. Returns True if the order was found

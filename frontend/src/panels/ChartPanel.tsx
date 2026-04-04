@@ -54,6 +54,20 @@ const CHART_MODES: { key: ChartMode; label: string }[] = [
   { key: 'ohlc', label: 'OHLC' },
 ];
 
+/**
+ * Convert a relative IMC Prosperity timestamp (0–999900) into a
+ * UTC seconds value that lightweight-charts can display properly.
+ * We anchor to a fake base date so the time axis shows readable
+ * "HH:MM" labels rather than 1970 epoch garbage.
+ */
+const BASE_UTC = Date.UTC(2025, 0, 1, 9, 0, 0) / 1000; // 2025-01-01 09:00 UTC in seconds
+function toChartTime(ts: number): Time {
+  // Prosperity timestamps are ~milliseconds within a trading day (0–1,000,000).
+  // Map them into a 6-hour trading window so the chart shows 09:00 → 15:00.
+  // 1,000,000 ticks → 21,600 seconds (6 hours)
+  return (BASE_UTC + Math.round(ts * 21.6 / 1000)) as Time;
+}
+
 export function ChartPanel() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -151,7 +165,7 @@ export function ChartPanel() {
   // Load OHLCV data when product changes
   useEffect(() => {
     if (!selectedProduct) return;
-    const interval = chartMode === 'line' || chartMode === 'step' ? 50 : 500;
+    const interval = chartMode === 'line' || chartMode === 'step' ? 500 : 5000;
     api.fetchOHLCV(selectedProduct, interval)
       .then(setOhlcv)
       .catch(console.error);
@@ -189,7 +203,7 @@ export function ChartPanel() {
         wickDownColor: '#ef4444',
       });
       const data = ohlcv.map((bar) => ({
-        time: (bar.timestamp / 1000) as Time,
+        time: toChartTime(bar.timestamp),
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -207,7 +221,7 @@ export function ChartPanel() {
         crosshairMarkerBackgroundColor: '#0a0e17',
       });
       const data = ohlcv.map((bar) => ({
-        time: (bar.timestamp / 1000) as Time,
+        time: toChartTime(bar.timestamp),
         value: bar.close,
       }));
       try { series.setData(data); } catch (e) { console.error('Failed to set line data:', e); }
@@ -224,7 +238,7 @@ export function ChartPanel() {
         scaleMargins: { top: 0.8, bottom: 0 },
       });
       const volData = ohlcv.map((bar) => ({
-        time: (bar.timestamp / 1000) as Time,
+        time: toChartTime(bar.timestamp),
         value: bar.volume,
         color: bar.close >= bar.open ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)',
       }));
@@ -235,7 +249,7 @@ export function ChartPanel() {
     }
 
     // Indicator overlays
-    const times = ohlcv.map((bar) => (bar.timestamp / 1000) as Time);
+    const times = ohlcv.map((bar) => toChartTime(bar.timestamp));
     const closes = ohlcv.map((bar) => bar.close);
     const volumes = ohlcv.map((bar) => bar.volume);
 
@@ -284,10 +298,10 @@ export function ChartPanel() {
 
         const grouped = new Map<string, MarkerAgg>();
 
-        const barTimes = ohlcv.map((bar) => (bar.timestamp / 1000) as Time);
+        const barTimes = ohlcv.map((bar) => toChartTime(bar.timestamp));
 
         const snapToNearestBarTime = (rawTs: number): Time => {
-          const target = rawTs / 1000;
+          const target = toChartTime(rawTs) as number;
           if (barTimes.length === 0) return target as Time;
           let best = barTimes[0] as number;
           let bestDiff = Math.abs(best - target);
@@ -326,13 +340,13 @@ export function ChartPanel() {
         }
 
         const markers = Array.from(grouped.values()).map((m) => {
-          const avgPrice = m.totalQty > 0 ? m.weightedPriceNumerator / m.totalQty : 0;
           return {
             time: m.time,
             position: (m.side === 'BUY' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
             color: m.side === 'BUY' ? '#10b981' : '#ef4444',
             shape: (m.side === 'BUY' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
-            text: `${m.side} ${m.totalQty}@${avgPrice.toFixed(1)}${m.count > 1 ? ` x${m.count}` : ''}`,
+            size: 1,
+            text: m.totalQty > 1 ? `${m.totalQty}` : '',
           };
         });
         (mainSeriesRef.current as any).setMarkers(markers.sort((a: any, b: any) => (a.time as number) - (b.time as number)));
@@ -357,7 +371,14 @@ export function ChartPanel() {
             {m.label}
           </button>
         ))}
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4, alignItems: 'center' }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          {fills && fills.length > 0 && (
+            <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 'var(--font-size-xs)', marginRight: 4 }}>
+              <span style={{ color: '#10b981' }}>▲ Buy</span>
+              <span style={{ color: '#ef4444' }}>▼ Sell</span>
+              <span style={{ color: 'var(--text-dim)' }}>({fills.length} fills)</span>
+            </span>
+          )}
           <span style={{ fontSize: 9, color: 'var(--text-dim)' }}>INDICATORS:</span>
           {['SMA20', 'SMA50', 'VWAP', 'BB'].map((ind) => (
             <label key={ind} style={{ display: 'flex', alignItems: 'center', gap: 2, fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)', cursor: 'pointer' }}>

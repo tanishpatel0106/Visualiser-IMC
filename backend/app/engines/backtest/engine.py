@@ -213,6 +213,11 @@ class BacktestEngine:
         # Clear own-trade buffer for next tick (strategy has seen them)
         self._own_trades_buffer = {p: [] for p in products}
 
+        # Cancel all previous resting orders before placing new ones.
+        # In IMC Prosperity, each strategy call's output replaces all
+        # previous orders — there is no persistent resting book between ticks.
+        self._execution_engine.cancel_all_resting(products)
+
         # Convert strategy output to internal orders
         strategy_orders = self._process_strategy_output(raw_orders, event.timestamp)
         self._all_orders.extend(strategy_orders)
