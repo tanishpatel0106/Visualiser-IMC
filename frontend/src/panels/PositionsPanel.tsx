@@ -188,11 +188,11 @@ export function PositionsPanel() {
             }}>
               {Number(qty) > 0 ? '+' : ''}{qty}
             </span>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td>-</td>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span>-</span>
           </div>
         ))
       ) : (

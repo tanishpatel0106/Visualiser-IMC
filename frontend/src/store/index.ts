@@ -99,10 +99,12 @@ interface ReplayStoreState {
   positions: Record<string, PositionState>;
   pnl: PnLState;
   inventory: InventoryState;
+  replayFills: FillEvent[];
+  replayTrace: DebugFrame[];
   setSessionId: (id: string | null) => void;
   setPlaying: (playing: boolean) => void;
   setSpeed: (speed: number) => void;
-  updateReplayState: (state: Partial<ReplayState>) => void;
+  updateReplayState: (state: Partial<ReplayState> & { strategy_fills?: FillEvent[]; debug_frame?: DebugFrame }) => void;
   updateFromStepResponse: (state: {
     books?: Record<string, VisibleOrderBook>;
     trades?: TradePrint[];
@@ -124,6 +126,8 @@ export const useReplayStore = create<ReplayStoreState>((set) => ({
   positions: {},
   pnl: defaultPnl,
   inventory: defaultInventory,
+  replayFills: [],
+  replayTrace: [],
   setSessionId: (id) => set({ sessionId: id }),
   setPlaying: (playing) => set({ isPlaying: playing }),
   setSpeed: (speed) => set({ speed }),
@@ -139,12 +143,19 @@ export const useReplayStore = create<ReplayStoreState>((set) => ({
       positions: state.positions ?? prev.positions,
       pnl: state.pnl ?? prev.pnl,
       inventory: state.inventory ?? prev.inventory,
+      replayFills: state.strategy_fills
+        ? [...prev.replayFills, ...state.strategy_fills]
+        : prev.replayFills,
+      replayTrace: state.debug_frame
+        ? [...prev.replayTrace, state.debug_frame]
+        : prev.replayTrace,
     })),
   updateFromStepResponse: (state) =>
     set((prev) => ({
       books: state.books ?? prev.books,
       trades: state.trades ? [...prev.trades, ...state.trades] : prev.trades,
       pnl: state.pnl ?? prev.pnl,
+      positions: state.positions ? (state.positions as Record<string, PositionState>) : prev.positions,
       currentIndex: prev.currentIndex + 1,
     })),
   resetReplay: () =>
@@ -158,6 +169,8 @@ export const useReplayStore = create<ReplayStoreState>((set) => ({
       positions: {},
       pnl: defaultPnl,
       inventory: defaultInventory,
+      replayFills: [],
+      replayTrace: [],
     }),
 }));
 

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { useBacktestStore } from '@/store';
+import { useBacktestStore, useReplayStore } from '@/store';
 import * as api from '@/services/api';
 
 type SortField = 'timestamp' | 'price' | 'quantity' | 'pnl_impact';
@@ -16,7 +16,8 @@ function formatTime(ts: number): string {
 }
 
 export function FillsPanel() {
-  const { currentRun, fills, setFills } = useBacktestStore();
+  const { currentRun, fills: backtestFills, setFills } = useBacktestStore();
+  const { replayFills, isPlaying } = useReplayStore();
   const [sortField, setSortField] = useState<SortField>('timestamp');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
 
@@ -28,6 +29,12 @@ export function FillsPanel() {
       setFills(res?.fills ?? []);
     }).catch(console.error);
   }, [currentRun, setFills]);
+
+  // Merge backtest fills and replay fills — replay fills take priority during active replay
+  const fills = useMemo(() => {
+    if (replayFills.length > 0) return replayFills;
+    return backtestFills ?? [];
+  }, [backtestFills, replayFills]);
 
   const sorted = useMemo(() => {
     return [...(fills ?? [])].sort((a, b) => {
