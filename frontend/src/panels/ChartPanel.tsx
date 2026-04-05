@@ -6,7 +6,7 @@ import * as api from '@/services/api';
 import * as ind from '@/utils/indicators';
 import { getIndicatorById, type IndicatorDef } from '@/utils/indicatorRegistry';
 import { IndicatorSelector } from '@/components/IndicatorSelector';
-import type { ChartMode, OHLCVBar } from '@/types';
+import type { ChartMode, IndicatorInstance, OHLCVBar } from '@/types';
 
 const CHART_MODES: { key: ChartMode; label: string }[] = [
   { key: 'candlestick', label: 'Candle' },
@@ -70,6 +70,16 @@ function extractArrays(bars: OHLCVBar[]): OhlcvArrays {
 }
 
 type N = number | null;
+
+/** Deduplicate time-series data: keep last value for each time. */
+function dedup<T extends { time: Time }>(arr: T[]): T[] {
+  if (arr.length <= 1) return arr;
+  const map = new Map<number, T>();
+  for (const item of arr) {
+    map.set(item.time as number, item);
+  }
+  return Array.from(map.values()).sort((a, b) => (a.time as number) - (b.time as number));
+}
 
 /** Compute indicator values. Returns array of series data arrays. */
 function computeIndicator(def: IndicatorDef, params: Record<string, number>, data: OhlcvArrays): N[][] {
@@ -184,18 +194,18 @@ function computeIndicator(def: IndicatorDef, params: Record<string, number>, dat
     case 'CCI': return [ind.cci(highs, lows, closes, p('period', 20))];
     case 'WILLIAMS_R': return [ind.williamsR(highs, lows, closes, p('period', 14))];
     case 'UO': return [ind.ultimateOscillator(highs, lows, closes, p('p1', 7), p('p2', 14), p('p3', 28))];
-    case 'AO': return [ind.awesomeOscillator(highs, lows)];
-    case 'AC': return [ind.acceleratorOscillator(highs, lows)];
+    case 'AO': return [ind.awesomeOscillator(highs, lows, p('fast', 5), p('slow', 34))];
+    case 'AC': return [ind.acceleratorOscillator(highs, lows, p('fast', 5), p('slow', 34))];
     case 'TRIX': return [ind.trix(closes, p('period', 15))];
     case 'TSI': return [ind.tsi(closes, p('longPeriod', 25), p('shortPeriod', 13))];
     case 'CMO': return [ind.cmo(closes, p('period', 14))];
     case 'DPO': return [ind.dpo(closes, p('period', 20))];
-    case 'CRSI': return [ind.connorsRsi(closes)];
+    case 'CRSI': return [ind.connorsRsi(closes, p('rsiPeriod', 3), p('streakPeriod', 2), p('rankPeriod', 100))];
     case 'FISHER': {
       const { fisher, trigger } = ind.fisherTransform(highs, lows, p('period', 10));
       return [fisher, trigger];
     }
-    case 'SCHAFF': return [ind.schaffTrendCycle(closes)];
+    case 'SCHAFF': return [ind.schaffTrendCycle(closes, p('fast', 23), p('slow', 50), p('cyclePeriod', 10))];
     case 'RVI': {
       const { rvi, signal } = ind.relativeVigorIndex(opens, highs, lows, closes, p('period', 10));
       return [rvi, signal];
@@ -214,15 +224,15 @@ function computeIndicator(def: IndicatorDef, params: Record<string, number>, dat
       const { plus, minus } = ind.vortex(highs, lows, closes, p('period', 14));
       return [plus, minus];
     }
-    case 'MASS_INDEX': return [ind.massIndex(highs, lows)];
-    case 'COPPOCK': return [ind.coppockCurve(closes)];
+    case 'MASS_INDEX': return [ind.massIndex(highs, lows, p('emaPeriod', 9), p('sumPeriod', 25))];
+    case 'COPPOCK': return [ind.coppockCurve(closes, p('longRoc', 14), p('shortRoc', 11), p('wmaPeriod', 10))];
     case 'KST': {
-      const { kst, signal } = ind.kst(closes);
+      const { kst, signal } = ind.kst(closes, p('r1', 10), p('r2', 15), p('r3', 20), p('r4', 30), 10, 10, 10, 15, p('sigPeriod', 9));
       return [kst, signal];
     }
     case 'QSTICK': return [ind.qstick(opens, closes, p('period', 14))];
     case 'SQUEEZE': {
-      const { value } = ind.squeezeMomentum(closes, highs, lows);
+      const { value } = ind.squeezeMomentum(closes, highs, lows, p('bbPeriod', 20), p('bbMult', 2), p('kcPeriod', 20), p('kcMult', 1.5));
       return [value];
     }
     case 'CHOP': return [ind.choppinessIndex(highs, lows, closes, p('period', 14))];
@@ -281,9 +291,60 @@ function getColors(def: IndicatorDef): string[] {
   return [def.color];
 }
 
+// ─── Reference level config per indicator type ───────────────
+/** Returns horizontal reference lines to draw on a pane for a given indicator. */
+function getReferenceLevels(id: string): { value: number; color: string; lineStyle: number; label: string }[] {
+  switch (id) {
+    case 'RSI': case 'STOCH_RSI': case 'CMO':
+      return [
+        { value: 70, color: 'rgba(239,68,68,0.4)', lineStyle: 2, label: '70' },
+        { value: 30, color: 'rgba(16,185,129,0.4)', lineStyle: 2, label: '30' },
+        { value: 50, color: 'rgba(107,114,128,0.25)', lineStyle: 2, label: '50' },
+      ];
+    case 'STOCH': case 'WILLIAMS_R':
+      return [
+        { value: 80, color: 'rgba(239,68,68,0.4)', lineStyle: 2, label: '80' },
+        { value: 20, color: 'rgba(16,185,129,0.4)', lineStyle: 2, label: '20' },
+      ];
+    case 'MFI':
+      return [
+        { value: 80, color: 'rgba(239,68,68,0.4)', lineStyle: 2, label: '80' },
+        { value: 20, color: 'rgba(16,185,129,0.4)', lineStyle: 2, label: '20' },
+      ];
+    case 'CRSI': case 'SCHAFF':
+      return [
+        { value: 90, color: 'rgba(239,68,68,0.4)', lineStyle: 2, label: '90' },
+        { value: 10, color: 'rgba(16,185,129,0.4)', lineStyle: 2, label: '10' },
+      ];
+    case 'CCI':
+      return [
+        { value: 100, color: 'rgba(239,68,68,0.4)', lineStyle: 2, label: '100' },
+        { value: -100, color: 'rgba(16,185,129,0.4)', lineStyle: 2, label: '-100' },
+        { value: 0, color: 'rgba(107,114,128,0.25)', lineStyle: 2, label: '0' },
+      ];
+    case 'ADX':
+      return [
+        { value: 25, color: 'rgba(251,191,36,0.4)', lineStyle: 2, label: '25' },
+      ];
+    case 'CHOP':
+      return [
+        { value: 61.8, color: 'rgba(239,68,68,0.3)', lineStyle: 2, label: '61.8' },
+        { value: 38.2, color: 'rgba(16,185,129,0.3)', lineStyle: 2, label: '38.2' },
+      ];
+    case 'MACD': case 'PPO': case 'AO': case 'AC': case 'TRIX': case 'TSI':
+    case 'DPO': case 'ROC': case 'MOM': case 'SQUEEZE': case 'QSTICK':
+    case 'FORCE': case 'EOM': case 'CMF':
+      return [
+        { value: 0, color: 'rgba(107,114,128,0.3)', lineStyle: 2, label: '0' },
+      ];
+    default:
+      return [];
+  }
+}
+
 // ─── Sub-chart pane for separate-pane indicators ────────────
 
-function SubPane({ indicators, data }: { indicators: IndicatorDef[]; data: OhlcvArrays }) {
+function SubPane({ instances, data }: { instances: { inst: IndicatorInstance; def: IndicatorDef }[]; data: OhlcvArrays }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRefs = useRef<(ISeriesApi<'Line'> | ISeriesApi<'Histogram'>)[]>([]);
@@ -317,29 +378,27 @@ function SubPane({ indicators, data }: { indicators: IndicatorDef[]; data: Ohlcv
     });
     seriesRefs.current = [];
 
-    for (const def of indicators) {
-      const params: Record<string, number> = {};
-      def.params.forEach(p => { params[p.name] = p.default; });
-
+    for (const { inst, def } of instances) {
       try {
-        const results = computeIndicator(def, params, data);
+        const results = computeIndicator(def, inst.params, data);
         const colors = getColors(def);
 
         results.forEach((series, sIdx) => {
-          const isHistogram = (def.id === 'MACD' && sIdx === 2) || (def.id === 'PPO' && sIdx === 2);
+          const isHistogram = ((def.id === 'MACD' || def.id === 'PPO') && sIdx === 2)
+            || def.id === 'SQUEEZE' || def.id === 'AO' || def.id === 'AC';
           if (isHistogram) {
             const histSeries = chart.addHistogramSeries({
               color: colors[sIdx] ?? def.color,
               priceLineVisible: false,
               lastValueVisible: false,
             });
-            const histData = data.times.flatMap((time, i) =>
+            const histData = dedup(data.times.flatMap((time, i) =>
               series[i] == null ? [] : [{
                 time,
                 value: series[i] as number,
                 color: (series[i] as number) >= 0 ? '#10b981' : '#ef4444',
               }]
-            );
+            ));
             histSeries.setData(histData);
             seriesRefs.current.push(histSeries as any);
           } else {
@@ -349,22 +408,46 @@ function SubPane({ indicators, data }: { indicators: IndicatorDef[]; data: Ohlcv
               priceLineVisible: false,
               lastValueVisible: sIdx === 0,
             });
-            const lineData = data.times.flatMap((time, i) =>
+            const lineData = dedup(data.times.flatMap((time, i) =>
               series[i] == null ? [] : [{ time, value: series[i] as number }]
-            );
+            ));
             lineSeries.setData(lineData);
             seriesRefs.current.push(lineSeries);
           }
         });
+
+        // Add reference level lines for oscillators
+        const refLevels = getReferenceLevels(def.id);
+        for (const level of refLevels) {
+          const refSeries = chart.addLineSeries({
+            color: level.color,
+            lineWidth: 1,
+            lineStyle: level.lineStyle as 0 | 1 | 2 | 3 | 4,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+          });
+          // Create a flat line across the entire time range
+          const refData = dedup([data.times[0], data.times[data.times.length - 1]]
+            .filter(Boolean)
+            .map(time => ({ time, value: level.value })));
+          if (refData.length >= 2) {
+            refSeries.setData(refData);
+            seriesRefs.current.push(refSeries);
+          }
+        }
       } catch (e) {
         console.error(`Failed to compute ${def.id}:`, e);
       }
     }
 
     try { chart.timeScale().fitContent(); } catch { /* ignore */ }
-  }, [indicators, data]);
+  }, [instances, data]);
 
-  const label = indicators.map(i => i.shortName).join(' / ');
+  const label = instances.map(({ inst, def }) => {
+    const paramVals = def.params.map(p => inst.params[p.name] ?? p.default);
+    return paramVals.length > 0 ? `${def.shortName}(${paramVals.join(',')})` : def.shortName;
+  }).join(' / ');
 
   return (
     <div style={{ borderTop: '1px solid var(--border-primary)', position: 'relative', minHeight: 80 }}>
@@ -420,24 +503,23 @@ export function ChartPanel() {
     return extractArrays(visibleBars);
   }, [visibleBars]);
 
-  // Separate selected indicators into overlays and panes
-  const overlayIndicators = useMemo(() =>
+  // Resolve selected indicators into instances with their definitions
+  const resolvedOverlays = useMemo(() =>
     selectedIndicators
-      .map(id => getIndicatorById(id))
-      .filter((d): d is IndicatorDef => d != null && d.placement === 'overlay'),
+      .map(inst => ({ inst, def: getIndicatorById(inst.id) }))
+      .filter((r): r is { inst: IndicatorInstance; def: IndicatorDef } => r.def != null && r.def.placement === 'overlay'),
     [selectedIndicators]);
 
-  const paneIndicators = useMemo(() =>
+  const resolvedPanes = useMemo(() =>
     selectedIndicators
-      .map(id => getIndicatorById(id))
-      .filter((d): d is IndicatorDef => d != null && d.placement === 'pane'),
+      .map(inst => ({ inst, def: getIndicatorById(inst.id) }))
+      .filter((r): r is { inst: IndicatorInstance; def: IndicatorDef } => r.def != null && r.def.placement === 'pane'),
     [selectedIndicators]);
 
-  // Group pane indicators that can share a sub-chart (same category, single output)
-  const paneGroups = useMemo(() => {
-    // Each pane indicator gets its own sub-chart for clarity
-    return paneIndicators.map(ind => [ind]);
-  }, [paneIndicators]);
+  // Each pane indicator gets its own sub-chart
+  const paneGroups = useMemo(() =>
+    resolvedPanes.map(r => [r]),
+    [resolvedPanes]);
 
   // Initialize chart
   useEffect(() => {
@@ -548,12 +630,10 @@ export function ChartPanel() {
       volumeSeriesRef.current = volSeries as any;
     } catch (e) { console.error('Volume error:', e); }
 
-    // Overlay indicators
-    for (const def of overlayIndicators) {
+    // Overlay indicators (each instance with its own params)
+    for (const { inst, def } of resolvedOverlays) {
       try {
-        const params: Record<string, number> = {};
-        def.params.forEach(p => { params[p.name] = p.default; });
-        const results = computeIndicator(def, params, ohlcvData);
+        const results = computeIndicator(def, inst.params, ohlcvData);
         const colors = getColors(def);
 
         results.forEach((series, sIdx) => {
@@ -564,9 +644,9 @@ export function ChartPanel() {
             lastValueVisible: sIdx === 0,
             lineStyle: def.id === 'VWAP' ? 2 : 0,
           });
-          const lineData = times.flatMap((time, i) =>
+          const lineData = dedup(times.flatMap((time, i) =>
             series[i] == null ? [] : [{ time, value: series[i] as number }]
-          );
+          ));
           lineSeries.setData(lineData);
           indicatorSeriesRefs.current.push(lineSeries);
         });
@@ -630,7 +710,7 @@ export function ChartPanel() {
     } else {
       try { chart.timeScale().fitContent(); } catch { /* */ }
     }
-  }, [visibleBars, chartMode, fills, overlayIndicators, ohlcvData, currentTimestamp]);
+  }, [visibleBars, chartMode, fills, resolvedOverlays, ohlcvData, currentTimestamp]);
 
   // Determine layout: main chart height vs sub-pane height
   const hasPanes = paneGroups.length > 0;
@@ -681,20 +761,24 @@ export function ChartPanel() {
             {crosshairData}
           </div>
         )}
-        {/* Active overlay indicator labels */}
-        {overlayIndicators.length > 0 && (
+        {/* Active overlay indicator labels with params */}
+        {resolvedOverlays.length > 0 && (
           <div style={{
             position: 'absolute', top: 4, left: 8, zIndex: 5, pointerEvents: 'none',
             display: 'flex', gap: 8, flexWrap: 'wrap',
           }}>
-            {overlayIndicators.map(def => (
-              <span key={def.id} style={{
-                fontSize: 9, padding: '1px 4px', borderRadius: 2,
-                background: 'rgba(10,14,23,0.85)', color: def.color,
-              }}>
-                {def.shortName}
-              </span>
-            ))}
+            {resolvedOverlays.map(({ inst, def }) => {
+              const paramVals = def.params.map(p => inst.params[p.name] ?? p.default);
+              const label = paramVals.length > 0 ? `${def.shortName}(${paramVals.join(',')})` : def.shortName;
+              return (
+                <span key={inst.key} style={{
+                  fontSize: 9, padding: '1px 4px', borderRadius: 2,
+                  background: 'rgba(10,14,23,0.85)', color: def.color,
+                }}>
+                  {label}
+                </span>
+              );
+            })}
           </div>
         )}
         {(!ohlcv || ohlcv.length === 0) && (
@@ -708,9 +792,9 @@ export function ChartPanel() {
       </div>
 
       {/* Sub-pane indicators */}
-      {ohlcvData && paneGroups.map((group, idx) => (
-        <div key={group.map(g => g.id).join('_')} style={{ flex: paneFlex, minHeight: 60 }}>
-          <SubPane indicators={group} data={ohlcvData} />
+      {ohlcvData && paneGroups.map((group) => (
+        <div key={group.map(g => g.inst.key).join('_')} style={{ flex: paneFlex, minHeight: 60 }}>
+          <SubPane instances={group} data={ohlcvData} />
         </div>
       ))}
     </div>

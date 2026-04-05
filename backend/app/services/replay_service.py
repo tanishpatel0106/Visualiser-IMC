@@ -172,29 +172,10 @@ class ReplayService:
                 if "pnl" in strategy_state:
                     result["state"]["pnl"] = strategy_state["pnl"]
                 if "positions" in strategy_state:
-                    pos_dict = {}
-                    for p, q in strategy_state["positions"].items():
-                        book = self._state.books.get(p)
-                        mid = book.mid_price if book else 0.0
-                        avg_entry = self._strategy_avg_entry.get(p, 0.0)
-                        if q > 0 and mid:
-                            unrealized = (mid - avg_entry) * q
-                        elif q < 0 and mid:
-                            unrealized = (avg_entry - mid) * abs(q)
-                        else:
-                            unrealized = 0.0
-                        pos_dict[p] = {
-                            "product": p,
-                            "quantity": q,
-                            "avg_entry_price": avg_entry,
-                            "mark_price": mid or 0.0,
-                            "unrealized_pnl": round(unrealized, 2),
-                            "realized_pnl": round(self._strategy_realized_pnl.get(p, 0.0), 2),
-                            "position_limit": 20,
-                        }
-                    result["state"]["positions"] = pos_dict
+                    result["state"]["positions"] = self._build_strategy_positions()
                 if "fills" in strategy_state and strategy_state["fills"]:
-                    existing_trades = result["state"].get("trades", [])
+                    # Use trade_tape key (what get_state_snapshot returns), NOT trades
+                    existing_trades = result["state"].get("trade_tape", [])
                     fill_trades = []
                     for f in strategy_state["fills"]:
                         fill_trades.append({
@@ -206,11 +187,12 @@ class ReplayService:
                             "buyer": "SUBMISSION" if f.get("side") == "BUY" else "",
                             "seller": "SUBMISSION" if f.get("side") == "SELL" else "",
                         })
-                    result["state"]["trades"] = existing_trades + fill_trades if isinstance(existing_trades, list) else fill_trades
+                    result["state"]["trade_tape"] = (existing_trades + fill_trades) if isinstance(existing_trades, list) else fill_trades
         elif self._strategy_active:
-            # Even on non-BOOK_SNAPSHOT events, send current strategy PnL
+            # On ALL non-BOOK_SNAPSHOT events, send current strategy PnL AND positions
             pnl = self._compute_strategy_pnl(self._state.books, event.timestamp)
             result["state"]["pnl"] = pnl
+            result["state"]["positions"] = self._build_strategy_positions()
 
         # Accumulate market trades for strategy context
         if self._strategy_active and event.event_type == EventType.TRADE_PRINT:
@@ -409,6 +391,30 @@ class ReplayService:
 
             if abs(signed_qty) > abs(old_pos):
                 self._strategy_avg_entry[product] = fill.price
+
+    def _build_strategy_positions(self) -> dict:
+        """Build position dict from current strategy state for frontend."""
+        pos_dict = {}
+        for p, q in self._strategy_positions.items():
+            book = self._state.books.get(p)
+            mid = book.mid_price if book else 0.0
+            avg_entry = self._strategy_avg_entry.get(p, 0.0)
+            if q > 0 and mid:
+                unrealized = (mid - avg_entry) * q
+            elif q < 0 and mid:
+                unrealized = (avg_entry - mid) * abs(q)
+            else:
+                unrealized = 0.0
+            pos_dict[p] = {
+                "product": p,
+                "quantity": q,
+                "avg_entry_price": round(avg_entry, 2),
+                "mark_price": round(mid, 2) if mid else 0.0,
+                "unrealized_pnl": round(unrealized, 2),
+                "realized_pnl": round(self._strategy_realized_pnl.get(p, 0.0), 2),
+                "position_limit": 20,
+            }
+        return pos_dict
 
     def _compute_strategy_pnl(self, books: dict[str, VisibleOrderBook], timestamp: int) -> dict:
         """Compute current strategy PnL from positions and books."""

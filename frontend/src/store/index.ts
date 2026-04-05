@@ -15,6 +15,7 @@ import type {
   FillEvent,
   StrategyDefinition,
   StrategyParameter,
+  IndicatorInstance,
   WorkspacePreset,
   ChartMode,
   OHLCVBar,
@@ -261,13 +262,15 @@ export const useStrategyStore = create<StrategyStoreState>((set, get) => ({
 
 interface UIStoreState {
   activeWorkspace: WorkspacePreset;
-  selectedIndicators: string[];
+  selectedIndicators: IndicatorInstance[];
   chartMode: ChartMode;
   bottomTab: string;
   showSettings: boolean;
   setActiveWorkspace: (workspace: WorkspacePreset) => void;
-  setSelectedIndicators: (indicators: string[]) => void;
-  toggleIndicator: (indicator: string) => void;
+  setSelectedIndicators: (indicators: IndicatorInstance[]) => void;
+  addIndicator: (instance: IndicatorInstance) => void;
+  removeIndicator: (key: string) => void;
+  updateIndicatorParams: (key: string, params: Record<string, number>) => void;
   setChartMode: (mode: ChartMode) => void;
   setBottomTab: (tab: string) => void;
   setShowSettings: (show: boolean) => void;
@@ -281,11 +284,19 @@ export const useUIStore = create<UIStoreState>((set) => ({
   showSettings: false,
   setActiveWorkspace: (workspace) => set({ activeWorkspace: workspace }),
   setSelectedIndicators: (indicators) => set({ selectedIndicators: indicators }),
-  toggleIndicator: (indicator) =>
+  addIndicator: (instance) =>
     set((prev) => ({
-      selectedIndicators: prev.selectedIndicators.includes(indicator)
-        ? prev.selectedIndicators.filter((i) => i !== indicator)
-        : [...prev.selectedIndicators, indicator],
+      selectedIndicators: [...prev.selectedIndicators, instance],
+    })),
+  removeIndicator: (key) =>
+    set((prev) => ({
+      selectedIndicators: prev.selectedIndicators.filter((i) => i.key !== key),
+    })),
+  updateIndicatorParams: (key, params) =>
+    set((prev) => ({
+      selectedIndicators: prev.selectedIndicators.map((i) =>
+        i.key === key ? { ...i, params } : i,
+      ),
     })),
   setChartMode: (mode) => set({ chartMode: mode }),
   setBottomTab: (tab) => set({ bottomTab: tab }),
