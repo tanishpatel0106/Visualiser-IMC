@@ -115,11 +115,20 @@ export function App() {
           }
         }
 
+        // Resolve PnL: prefer explicit pnl, fall back to last entry in pnl_history
+        let pnlData = state.pnl as PnLState | undefined;
+        if (!pnlData) {
+          const pnlHistory = state.pnl_history as PnLState[] | undefined;
+          if (pnlHistory && pnlHistory.length > 0) {
+            pnlData = pnlHistory[pnlHistory.length - 1];
+          }
+        }
+
         updateReplayState({
           books: (state.books ?? {}) as Record<string, VisibleOrderBook>,
           trades: tradeTape,
           positions: (state.positions ?? {}) as Record<string, PositionState>,
-          pnl: (state.pnl ?? undefined) as PnLState | undefined,
+          pnl: pnlData,
           current_timestamp: (payload.current_timestamp as number) ?? 0,
           current_index: (payload.current_index as number) ?? 0,
           total_events: (payload.total_events as number) ?? 0,

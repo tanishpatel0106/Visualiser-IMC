@@ -14,6 +14,16 @@ export type ExecutionModel = 'CONSERVATIVE' | 'BALANCED' | 'OPTIMISTIC';
 
 export type ChartMode = 'line' | 'candlestick' | 'ohlc' | 'step';
 
+/** A specific indicator instance with its own parameter overrides. */
+export interface IndicatorInstance {
+  /** Unique key for this instance (e.g. "SMA_1687339200") */
+  key: string;
+  /** Indicator ID from the registry (e.g. "SMA", "RSI") */
+  id: string;
+  /** User-configured parameter values */
+  params: Record<string, number>;
+}
+
 // === Market Data ===
 
 export interface BookLevel {
