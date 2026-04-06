@@ -15,6 +15,7 @@ import type {
   FillEvent,
   StrategyDefinition,
   StrategyParameter,
+  IndicatorInstance,
   WorkspacePreset,
   ChartMode,
   OHLCVBar,
@@ -99,10 +100,12 @@ interface ReplayStoreState {
   positions: Record<string, PositionState>;
   pnl: PnLState;
   inventory: InventoryState;
+  replayFills: FillEvent[];
+  replayTrace: DebugFrame[];
   setSessionId: (id: string | null) => void;
   setPlaying: (playing: boolean) => void;
   setSpeed: (speed: number) => void;
-  updateReplayState: (state: Partial<ReplayState>) => void;
+  updateReplayState: (state: Partial<ReplayState> & { strategy_fills?: FillEvent[]; debug_frame?: DebugFrame }) => void;
   updateFromStepResponse: (state: {
     books?: Record<string, VisibleOrderBook>;
     trades?: TradePrint[];
@@ -124,6 +127,8 @@ export const useReplayStore = create<ReplayStoreState>((set) => ({
   positions: {},
   pnl: defaultPnl,
   inventory: defaultInventory,
+  replayFills: [],
+  replayTrace: [],
   setSessionId: (id) => set({ sessionId: id }),
   setPlaying: (playing) => set({ isPlaying: playing }),
   setSpeed: (speed) => set({ speed }),
@@ -139,12 +144,19 @@ export const useReplayStore = create<ReplayStoreState>((set) => ({
       positions: state.positions ?? prev.positions,
       pnl: state.pnl ?? prev.pnl,
       inventory: state.inventory ?? prev.inventory,
+      replayFills: state.strategy_fills
+        ? [...prev.replayFills, ...state.strategy_fills]
+        : prev.replayFills,
+      replayTrace: state.debug_frame
+        ? [...prev.replayTrace, state.debug_frame]
+        : prev.replayTrace,
     })),
   updateFromStepResponse: (state) =>
     set((prev) => ({
       books: state.books ?? prev.books,
       trades: state.trades ? [...prev.trades, ...state.trades] : prev.trades,
       pnl: state.pnl ?? prev.pnl,
+      positions: state.positions ? (state.positions as Record<string, PositionState>) : prev.positions,
       currentIndex: prev.currentIndex + 1,
     })),
   resetReplay: () =>
@@ -158,6 +170,8 @@ export const useReplayStore = create<ReplayStoreState>((set) => ({
       positions: {},
       pnl: defaultPnl,
       inventory: defaultInventory,
+      replayFills: [],
+      replayTrace: [],
     }),
 }));
 
@@ -248,13 +262,15 @@ export const useStrategyStore = create<StrategyStoreState>((set, get) => ({
 
 interface UIStoreState {
   activeWorkspace: WorkspacePreset;
-  selectedIndicators: string[];
+  selectedIndicators: IndicatorInstance[];
   chartMode: ChartMode;
   bottomTab: string;
   showSettings: boolean;
   setActiveWorkspace: (workspace: WorkspacePreset) => void;
-  setSelectedIndicators: (indicators: string[]) => void;
-  toggleIndicator: (indicator: string) => void;
+  setSelectedIndicators: (indicators: IndicatorInstance[]) => void;
+  addIndicator: (instance: IndicatorInstance) => void;
+  removeIndicator: (key: string) => void;
+  updateIndicatorParams: (key: string, params: Record<string, number>) => void;
   setChartMode: (mode: ChartMode) => void;
   setBottomTab: (tab: string) => void;
   setShowSettings: (show: boolean) => void;
@@ -268,11 +284,19 @@ export const useUIStore = create<UIStoreState>((set) => ({
   showSettings: false,
   setActiveWorkspace: (workspace) => set({ activeWorkspace: workspace }),
   setSelectedIndicators: (indicators) => set({ selectedIndicators: indicators }),
-  toggleIndicator: (indicator) =>
+  addIndicator: (instance) =>
     set((prev) => ({
-      selectedIndicators: prev.selectedIndicators.includes(indicator)
-        ? prev.selectedIndicators.filter((i) => i !== indicator)
-        : [...prev.selectedIndicators, indicator],
+      selectedIndicators: [...prev.selectedIndicators, instance],
+    })),
+  removeIndicator: (key) =>
+    set((prev) => ({
+      selectedIndicators: prev.selectedIndicators.filter((i) => i.key !== key),
+    })),
+  updateIndicatorParams: (key, params) =>
+    set((prev) => ({
+      selectedIndicators: prev.selectedIndicators.map((i) =>
+        i.key === key ? { ...i, params } : i,
+      ),
     })),
   setChartMode: (mode) => set({ chartMode: mode }),
   setBottomTab: (tab) => set({ bottomTab: tab }),

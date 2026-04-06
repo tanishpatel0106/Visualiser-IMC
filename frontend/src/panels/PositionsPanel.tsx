@@ -73,13 +73,17 @@ function formatPnl(v: number): string {
 export function PositionsPanel() {
   const { positions, pnl } = useReplayStore();
 
-  const posEntries = Object.values(positions ?? {});
+  const allPosEntries = Object.values(positions ?? {});
+  // Show positions with non-zero qty first, then zero-qty ones dimmed
+  const activePositions = allPosEntries.filter(p => p.quantity !== 0);
+  const flatPositions = allPosEntries.filter(p => p.quantity === 0 && ((p.realized_pnl ?? 0) !== 0));
+  const posEntries = [...activePositions, ...flatPositions];
   const totalPnl = pnl?.total_pnl ?? 0;
   const realizedPnl = pnl?.realized_pnl ?? 0;
   const unrealizedPnl = pnl?.unrealized_pnl ?? 0;
 
   // Also show inventory from pnl state if positions are sparse
-  const inventoryEntries = pnl?.inventory ? Object.entries(pnl.inventory) : [];
+  const inventoryEntries = pnl?.inventory ? Object.entries(pnl.inventory).filter(([, qty]) => Number(qty) !== 0) : [];
 
   return (
     <div style={styles.container}>
@@ -188,11 +192,11 @@ export function PositionsPanel() {
             }}>
               {Number(qty) > 0 ? '+' : ''}{qty}
             </span>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</td>
-            <td>-</td>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span style={{ textAlign: 'right', color: 'var(--text-dim)' }}>-</span>
+            <span>-</span>
           </div>
         ))
       ) : (

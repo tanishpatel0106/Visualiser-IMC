@@ -1,6 +1,7 @@
 import React from 'react';
 import { useDatasetStore, useReplayStore, useStrategyStore, useUIStore } from '@/store';
 import * as api from '@/services/api';
+import type { FillEvent, PnLState, PositionState, TradePrint, VisibleOrderBook } from '@/types';
 
 const SPEEDS = [0.25, 0.5, 1, 2, 5, 10];
 
@@ -109,7 +110,8 @@ export function Header() {
         try {
           const session = await api.startReplay(
             [selectedProduct],
-            selectedDay !== null ? [selectedDay] : []
+            selectedDay !== null ? [selectedDay] : [],
+            selectedStrategy?.strategy_id ?? null,
           );
           useReplayStore.getState().resetReplay();
           useReplayStore.getState().setSessionId(session.session_id);
@@ -124,18 +126,39 @@ export function Header() {
     }
   };
 
+  const processStepResponse = (resp: unknown) => {
+    const payload = resp as Record<string, unknown>;
+    if (!payload?.state) return;
+    const state = payload.state as Record<string, unknown>;
+    const strategyState = (payload.strategy_state ?? {}) as Record<string, unknown>;
+    const stratFills = (strategyState.fills ?? []) as FillEvent[];
+    const tradeTape = (state.trade_tape ?? state.trades) as TradePrint[] | undefined;
+
+    // Resolve PnL: prefer explicit pnl, fall back to last entry in pnl_history
+    let pnlData = state.pnl as PnLState | undefined;
+    if (!pnlData) {
+      const pnlHistory = state.pnl_history as PnLState[] | undefined;
+      if (pnlHistory && pnlHistory.length > 0) {
+        pnlData = pnlHistory[pnlHistory.length - 1];
+      }
+    }
+
+    useReplayStore.getState().updateReplayState({
+      books: (state.books ?? undefined) as Record<string, VisibleOrderBook> | undefined,
+      trades: tradeTape,
+      positions: (state.positions ?? undefined) as Record<string, PositionState> | undefined,
+      pnl: pnlData,
+      current_timestamp: (payload.current_timestamp as number) ?? 0,
+      current_index: (payload.current_index as number) ?? 0,
+      total_events: (payload.total_events as number) ?? totalEvents,
+      strategy_fills: stratFills.length > 0 ? stratFills : undefined,
+    });
+  };
+
   const handleStep = async () => {
     try {
       const resp = await api.stepReplay();
-      const payload = resp as unknown as Record<string, unknown>;
-      if (payload?.state) {
-        useReplayStore.getState().updateFromStepResponse(payload.state as Record<string, unknown>);
-        useReplayStore.getState().updateReplayState({
-          current_timestamp: (payload.current_timestamp as number) ?? 0,
-          current_index: (payload.current_index as number) ?? 0,
-          total_events: (payload.total_events as number) ?? totalEvents,
-        });
-      }
+      processStepResponse(resp);
     } catch (err) {
       console.error(err);
     }
@@ -144,15 +167,7 @@ export function Header() {
   const handleStepBack = async () => {
     try {
       const resp = await api.stepBackReplay();
-      const payload = resp as unknown as Record<string, unknown>;
-      if (payload?.state) {
-        useReplayStore.getState().updateFromStepResponse(payload.state as Record<string, unknown>);
-        useReplayStore.getState().updateReplayState({
-          current_timestamp: (payload.current_timestamp as number) ?? 0,
-          current_index: (payload.current_index as number) ?? 0,
-          total_events: (payload.total_events as number) ?? totalEvents,
-        });
-      }
+      processStepResponse(resp);
     } catch (err) {
       console.error(err);
     }
