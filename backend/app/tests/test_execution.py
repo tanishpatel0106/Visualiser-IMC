@@ -265,7 +265,7 @@ class TestPassiveFillConservative:
 class TestPassiveAllocation:
     def test_global_trade_quantity_consumption(self, conservative_engine):
         book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
-        o1 = _make_order(order_id="o1", side=OrderSide.BUY, price=98.0, quantity=5, timestamp=100)
+        o1 = _make_order(order_id="o1", side=OrderSide.BUY, price=97.0, quantity=5, timestamp=100)
         o2 = _make_order(order_id="o2", side=OrderSide.BUY, price=97.0, quantity=5, timestamp=101)
         conservative_engine.process_order(o1, book)
         conservative_engine.process_order(o2, book)
@@ -294,7 +294,7 @@ class TestPassiveAllocation:
 
         trade = TradePrint(
             timestamp=300, buyer="A", seller="B", symbol="X",
-            price=98.0, quantity=7, aggressor_side=OrderSide.SELL,
+            price=98.0, quantity=7, aggressor_side=None,
         )
         fills = conservative_engine.check_passive_fills(book, [trade])
 
@@ -321,6 +321,20 @@ class TestPassiveAllocation:
         )
         fills = conservative_engine.check_passive_fills(book, [sell_aggr_trade])
         assert [f.order_id for f in fills] == ["buy"]
+
+    def test_known_aggressor_requires_exact_trade_level(self, conservative_engine):
+        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
+        better_bid = _make_order(order_id="b1", side=OrderSide.BUY, price=99.0, quantity=5)
+        at_trade = _make_order(order_id="b2", side=OrderSide.BUY, price=98.0, quantity=5)
+        conservative_engine.process_order(better_bid, book)
+        conservative_engine.process_order(at_trade, book)
+
+        trade = TradePrint(
+            timestamp=250, buyer="A", seller="B", symbol="X",
+            price=98.0, quantity=5, aggressor_side=OrderSide.SELL,
+        )
+        fills = conservative_engine.check_passive_fills(book, [trade])
+        assert [f.order_id for f in fills] == ["b2"]
 
     def test_missing_aggressor_side_fallback_conservative(self, conservative_engine):
         book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])

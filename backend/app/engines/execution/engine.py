@@ -382,8 +382,16 @@ class ExecutionEngine:
             # Better SELL price is lower.
             eligible.sort(key=lambda o: (o.price, o.timestamp, o.order_id))
         else:
-            # Unknown side fallback: keep deterministic by price-time.
-            eligible.sort(key=lambda o: (o.timestamp, o.order_id))
+            # Unknown side fallback: still keep side-local price-time
+            # priority (BUY high->low, SELL low->high).
+            eligible.sort(
+                key=lambda o: (
+                    0 if o.side == OrderSide.BUY else 1,
+                    -o.price if o.side == OrderSide.BUY else o.price,
+                    o.timestamp,
+                    o.order_id,
+                )
+            )
 
         return eligible
 
@@ -401,6 +409,13 @@ class ExecutionEngine:
         if target_side is not None and order.side != target_side:
             return False
 
+        # When aggressor side is known, enforce strict conservative
+        # price matching: we only fill at the traded level itself.
+        if target_side is not None:
+            return abs(trade.price - order.price) < 1e-9
+
+        # Fallback (unknown aggressor side): conservative price-based
+        # compatibility only.
         if order.side == OrderSide.BUY:
             return trade.price <= order.price
         return trade.price >= order.price
