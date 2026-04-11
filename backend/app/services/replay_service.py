@@ -340,11 +340,9 @@ class ReplayService:
                 if book is None:
                     continue
 
-                recent_trades_raw = self._strategy_market_trades.get(order.product, [])
-
                 # Aggressive orders fill immediately; passive orders go to resting book
                 fills = self._execution_engine.process_order(
-                    order, book, recent_trades_raw
+                    order, book
                 )
 
                 for fill in fills:
