@@ -11,7 +11,7 @@ from app.engines.execution.engine import ExecutionEngine
 from app.engines.strategies.registry import StrategyRegistry
 from app.models.backtest import ExecutionModel
 from app.models.events import EventType
-from app.models.market import VisibleOrderBook, TradePrint
+from app.models.market import OrderSide, VisibleOrderBook, TradePrint
 from app.services.dataset_service import DatasetService
 
 logger = logging.getLogger(__name__)
@@ -116,15 +116,27 @@ class ReplayService:
         parameters: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialize strategy sandbox and execution engine for live replay."""
-        from app.core.deps import get_strategy_registry
+        from app.core.deps import get_strategy_registry, get_storage
 
         registry = get_strategy_registry()
         strat_def = registry.get_by_id(strategy_id)
-        if strat_def is None:
+        source_code: Optional[str] = None
+
+        if strat_def is not None:
+            # Built-in strategy from registry
+            source_code = strat_def.source_code
+        else:
+            # Check uploaded strategies in storage (database)
+            storage = get_storage()
+            stored = storage.get_strategy(strategy_id)
+            if stored is not None:
+                source_code = stored.get("source_code")
+
+        if source_code is None:
             raise ValueError(f"Strategy '{strategy_id}' not found")
 
         # Load the strategy
-        self._strategy_instance = self._sandbox.load_strategy(strat_def.source_code)
+        self._strategy_instance = self._sandbox.load_strategy(source_code)
 
         # Create execution engine
         exec_model = ExecutionModel(execution_model)
@@ -215,17 +227,83 @@ class ReplayService:
 
         return result
 
+    def _process_fill(self, fill, timestamp: int) -> dict:
+        """Process a single fill: update positions, own trades, PnL. Returns fill dict."""
+        is_buy = fill.side == OrderSide.BUY
+
+        fill_dict = {
+            "order_id": fill.order_id,
+            "product": fill.product,
+            "side": fill.side.value if hasattr(fill.side, 'value') else ("BUY" if is_buy else "SELL"),
+            "price": fill.price,
+            "quantity": fill.quantity,
+            "timestamp": fill.timestamp or timestamp,
+            "is_aggressive": fill.is_aggressive,
+        }
+        self._strategy_fills.append(fill_dict)
+
+        # Update positions: BUY adds, SELL subtracts
+        signed_qty = fill.quantity if is_buy else -fill.quantity
+        old_pos = self._strategy_positions.get(fill.product, 0)
+        new_pos = old_pos + signed_qty
+        self._strategy_positions[fill.product] = new_pos
+        self._execution_engine.update_position(fill.product, new_pos)
+
+        # Track own trades for next strategy call
+        own_trade = TradePrint(
+            timestamp=fill.timestamp or timestamp,
+            buyer="SUBMISSION" if is_buy else "",
+            seller="" if is_buy else "SUBMISSION",
+            symbol=fill.product,
+            price=fill.price,
+            quantity=fill.quantity,
+        )
+        if fill.product not in self._strategy_own_trades:
+            self._strategy_own_trades[fill.product] = []
+        self._strategy_own_trades[fill.product].append(own_trade)
+
+        # Update PnL tracking
+        self._update_strategy_pnl(fill, old_pos)
+
+        return fill_dict
+
     def _run_strategy_step(self, event) -> Optional[dict]:
-        """Execute the strategy against the current book state and return results."""
+        """Execute the strategy against the current book state and return results.
+
+        Flow (matches Prosperity semantics):
+        1. Check passive fills on EXISTING resting orders against the NEW book
+           (orders placed on tick N are evaluated against tick N+1's book)
+        2. Cancel remaining unfilled resting orders
+        3. Run the strategy to get new orders
+        4. Process new orders: aggressive fills happen immediately,
+           passive orders rest until the next tick
+        """
         if not self._strategy_instance or not self._execution_engine:
             return None
 
         try:
-            # Build the current books from replay state
             books = self._state.books
             timestamp = event.timestamp
+            step_fills = []
 
-            # Build Prosperity TradingState
+            # ── Step 1: Check passive fills on EXISTING resting orders ──
+            # Orders from the PREVIOUS tick are checked against the CURRENT book.
+            # This is the correct Prosperity flow: orders placed on tick N
+            # get evaluated for fills when tick N+1's book arrives.
+            for product in self._products:
+                book = books.get(product)
+                if book is None:
+                    continue
+                recent = self._strategy_market_trades.get(product, [])
+                passive_fills = self._execution_engine.check_passive_fills(book, recent)
+                for fill in passive_fills:
+                    fd = self._process_fill(fill, timestamp)
+                    step_fills.append(fd)
+
+            # ── Step 2: Cancel remaining resting orders (Prosperity semantics) ──
+            self._execution_engine.cancel_all_resting(self._products)
+
+            # ── Step 3: Build state and run strategy ──
             trading_state = self._adapter.build_state(
                 timestamp=timestamp,
                 products=self._products,
@@ -236,23 +314,18 @@ class ReplayService:
                 trader_data=self._trader_data,
             )
 
-            # Execute strategy
             raw_orders, conversions, trader_data = self._sandbox.execute_strategy(
                 self._strategy_instance,
                 trading_state,
             )
             self._trader_data = trader_data if isinstance(trader_data, str) and not trader_data.startswith("ERROR:") else self._trader_data
 
-            # Cancel previous resting orders (Prosperity semantics)
-            self._execution_engine.cancel_all_resting(self._products)
-
-            # Parse and process orders
+            # ── Step 4: Parse and process new orders ──
             orders = self._adapter.parse_orders(
                 raw_orders if isinstance(raw_orders, dict) else {},
                 timestamp=timestamp,
             )
 
-            step_fills = []
             orders_submitted = []
             for order in orders:
                 orders_submitted.append({
@@ -263,82 +336,20 @@ class ReplayService:
                     "quantity": order.quantity,
                 })
 
-                # Get the book for this product
                 book = books.get(order.product)
                 if book is None:
                     continue
 
-                # Get recent trades for passive fill checking
                 recent_trades_raw = self._strategy_market_trades.get(order.product, [])
 
-                # Process order through execution engine
+                # Aggressive orders fill immediately; passive orders go to resting book
                 fills = self._execution_engine.process_order(
                     order, book, recent_trades_raw
                 )
 
                 for fill in fills:
-                    fill_dict = {
-                        "order_id": fill.order_id,
-                        "product": fill.product,
-                        "side": fill.side.value if hasattr(fill.side, 'value') else str(fill.side),
-                        "price": fill.price,
-                        "quantity": fill.quantity,
-                        "timestamp": fill.timestamp or timestamp,
-                        "is_aggressive": fill.is_aggressive,
-                    }
-                    step_fills.append(fill_dict)
-                    self._strategy_fills.append(fill_dict)
-
-                    # Update positions
-                    signed_qty = fill.quantity if str(fill.side) == "BUY" else -fill.quantity
-                    old_pos = self._strategy_positions.get(fill.product, 0)
-                    new_pos = old_pos + signed_qty
-                    self._strategy_positions[fill.product] = new_pos
-                    self._execution_engine.update_position(fill.product, new_pos)
-
-                    # Track own trades for next strategy call
-                    own_trade = TradePrint(
-                        timestamp=fill.timestamp or timestamp,
-                        buyer="SUBMISSION" if str(fill.side) == "BUY" else "",
-                        seller="SUBMISSION" if str(fill.side) == "SELL" else "",
-                        symbol=fill.product,
-                        price=fill.price,
-                        quantity=fill.quantity,
-                    )
-                    if fill.product not in self._strategy_own_trades:
-                        self._strategy_own_trades[fill.product] = []
-                    self._strategy_own_trades[fill.product].append(own_trade)
-
-                    # Update PnL tracking
-                    self._update_strategy_pnl(fill, old_pos)
-
-            # Also check passive fills on existing resting orders
-            for product in self._products:
-                book = books.get(product)
-                if book is None:
-                    continue
-                recent = self._strategy_market_trades.get(product, [])
-                passive_fills = self._execution_engine.check_passive_fills(book, recent)
-                for fill in passive_fills:
-                    fill_dict = {
-                        "order_id": fill.order_id,
-                        "product": fill.product,
-                        "side": fill.side.value if hasattr(fill.side, 'value') else str(fill.side),
-                        "price": fill.price,
-                        "quantity": fill.quantity,
-                        "timestamp": fill.timestamp or timestamp,
-                        "is_aggressive": fill.is_aggressive,
-                    }
-                    step_fills.append(fill_dict)
-                    self._strategy_fills.append(fill_dict)
-
-                    signed_qty = fill.quantity if str(fill.side) == "BUY" else -fill.quantity
-                    old_pos = self._strategy_positions.get(fill.product, 0)
-                    new_pos = old_pos + signed_qty
-                    self._strategy_positions[fill.product] = new_pos
-                    self._execution_engine.update_position(fill.product, new_pos)
-
-                    self._update_strategy_pnl(fill, old_pos)
+                    fd = self._process_fill(fill, timestamp)
+                    step_fills.append(fd)
 
             # Clear own trades after strategy consumed them (Prosperity semantics)
             for p in self._products:
@@ -369,7 +380,8 @@ class ReplayService:
     def _update_strategy_pnl(self, fill, old_pos: int) -> None:
         """Update realized PnL when a fill reduces/flips the position."""
         product = fill.product
-        signed_qty = fill.quantity if str(fill.side) == "BUY" else -fill.quantity
+        is_buy = fill.side == OrderSide.BUY or (hasattr(fill.side, 'value') and fill.side.value == "BUY")
+        signed_qty = fill.quantity if is_buy else -fill.quantity
         new_pos = old_pos + signed_qty
 
         if old_pos == 0:

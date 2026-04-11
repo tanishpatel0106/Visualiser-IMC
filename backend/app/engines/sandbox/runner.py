@@ -301,8 +301,22 @@ class StrategySandbox:
             top_level = name.split(".")[0]
 
             # Allow backend imports (for built-in strategies importing adapter classes)
+            # Handle both "backend.app.engines..." and "app.engines..." paths
             if top_level == "backend":
-                return _real_import(name, globals, locals, fromlist, level)
+                # Strip "backend." prefix since we run from inside backend/
+                stripped_name = name[len("backend."):]
+                try:
+                    return _real_import(stripped_name, globals, locals, fromlist, level)
+                except ImportError:
+                    # Fall back to original path
+                    try:
+                        return _real_import(name, globals, locals, fromlist, level)
+                    except ImportError:
+                        pass
+                    # If both fail, return a module containing pre-injected classes
+                    # so strategies can import Order, Trade, etc.
+                    from app.engines.sandbox import adapter as _adapter_mod
+                    return _adapter_mod
 
             if top_level in FORBIDDEN_MODULES:
                 raise ImportError(

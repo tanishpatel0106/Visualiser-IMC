@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useReplayStore, useDatasetStore, useUIStore } from '@/store';
+import { useReplayStore, useDatasetStore, useStrategyStore, useUIStore } from '@/store';
 import * as api from '@/services/api';
 
 export function useKeyboardShortcuts() {
@@ -19,12 +19,15 @@ export function useKeyboardShortcuts() {
             api.pauseReplay().catch(console.error);
             setPlaying(false);
           } else {
-            // Start replay with current product/day selections
+            // Start replay with current product/day/strategy selections
             const { selectedProduct, selectedDay } = useDatasetStore.getState();
+            const { selectedStrategy } = useStrategyStore.getState();
             if (selectedProduct && selectedDay !== null) {
+              useReplayStore.getState().resetReplay();
               api.startReplay(
                 [selectedProduct],
-                selectedDay !== null ? [selectedDay] : []
+                selectedDay !== null ? [selectedDay] : [],
+                selectedStrategy?.strategy_id ?? null,
               ).then((session) => {
                 useReplayStore.getState().setSessionId(session.session_id);
                 if (session.total_events) {

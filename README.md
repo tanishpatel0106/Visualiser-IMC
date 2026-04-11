@@ -4,6 +4,12 @@ A professional-grade, Bloomberg-style trading terminal and research platform pur
 
 **Built with:** Python FastAPI backend (data processing, strategy execution, backtesting) + React TypeScript frontend (Zustand state management, TradingView Lightweight Charts, resizable panel layouts, real-time WebSocket streaming).
 
+### Live Strategy Replay
+
+![Live Strategy Replay](docs/screenshots/05_live_strategy_replay.png)
+
+*Real-time strategy execution with order book, candlestick chart with fill markers, PnL in header, depth chart, strategy parameters, and trade tape.*
+
 ---
 
 ## Table of Contents
@@ -185,6 +191,10 @@ This section walks through **every feature** of the terminal step by step.
 
 When you first open the terminal, you see the **Trading Workspace** layout:
 
+![Trading Workspace](docs/screenshots/01_trading_workspace.png)
+
+*The Trading workspace: order book (left), candlestick chart with volume (center), strategy panel (right), tabbed bottom panel.*
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  HEADER BAR                                                                  │
@@ -303,6 +313,10 @@ Use the speed dropdown in the header to change playback speed. Available options
 
 ### 4. Using the Order Book Panel
 
+![Order Book and Chart](docs/screenshots/06_orderbook_and_chart.png)
+
+*Order book with 3 levels of bid/ask depth, spread indicator, depth chart visualisation, and live price chart with fill markers.*
+
 The **Order Book** panel (top-left in Trading workspace) shows a ladder view of the current bid and ask levels:
 
 ```
@@ -346,6 +360,10 @@ The **Chart Panel** (center) displays price action using TradingView Lightweight
 | **Step** | Step-function line (shows exact price levels between changes) |
 | **OHLC** | Open-High-Low-Close bar chart |
 
+![Line Chart Mode](docs/screenshots/15_line_chart_mode.png)
+
+*Line chart mode showing continuous mid-price with SMA/EMA overlays and volume bars.*
+
 **Chart features:**
 
 - **Volume bars** at the bottom of the chart (green = up candle volume, red = down)
@@ -362,6 +380,10 @@ The **Chart Panel** (center) displays price action using TradingView Lightweight
 - The chart auto-scrolls to follow new data during replay
 
 ### 6. Adding Technical Indicators
+
+![Indicator Selector](docs/screenshots/10_indicator_selector.png)
+
+*The Indicator Selector panel showing 200+ indicators organized by category, each with configurable parameters and "+ Add" buttons.*
 
 The terminal includes **200+ technical indicators** computed entirely on the client side for instant response.
 
@@ -386,6 +408,10 @@ You can add the same indicator type with different parameters. For example:
 
 Each instance is tracked separately and displayed with a distinct color.
 
+![Chart with Indicators](docs/screenshots/11_chart_with_indicators.png)
+
+*Price chart with SMA(20) and EMA(20) indicator overlays. Active indicators shown as tags in the chart header.*
+
 **Indicator categories and examples:**
 
 | Category | Indicators | Display |
@@ -407,6 +433,10 @@ Oscillators like RSI automatically draw horizontal reference lines:
 - **MACD**: Zero line
 
 ### 7. Selecting and Running a Strategy
+
+![Strategy Panel](docs/screenshots/13_strategy_panel_detail.png)
+
+*Strategy workspace showing the library (left), selected strategy with parameters, execution model selector, and Run Strategy button.*
 
 **Selecting a strategy for live replay:**
 
@@ -439,6 +469,10 @@ When a strategy is active during replay:
    - **Debug Trace** tab: Per-tick strategy state
 
 ### 8. Real-Time Strategy Replay (Live Mode)
+
+![Live Replay with Strategy](docs/screenshots/05_live_strategy_replay.png)
+
+*Live strategy replay: LIVE badge, Fixed Spread Maker strategy active, fill markers on chart, PnL updating in header, order book live, trade tape flowing.*
 
 This is the most powerful feature &mdash; watching a strategy execute in real-time against historical data.
 
@@ -483,6 +517,10 @@ These values update in real-time during replay with a strategy active.
 
 ### 10. Viewing Positions
 
+![Positions Panel](docs/screenshots/07_positions_tab.png)
+
+*Positions panel showing active holdings with quantity, average entry price, mark price, unrealized/realized PnL, and position limits.*
+
 Click the **POSITIONS** tab in the bottom panel to see current holdings.
 
 The positions table shows:
@@ -505,6 +543,10 @@ POSITIONS: 1   UNREALIZED: +10.00   REALIZED: +0.00   TOTAL PNL: +10.00   CASH: 
 **Active positions** (qty ≠ 0) are shown first, followed by **flat positions** that have realized PnL from previously closed trades.
 
 ### 11. Viewing Fills
+
+![Fills Panel](docs/screenshots/08_fills_tab.png)
+
+*Fills panel showing every strategy execution: timestamp, symbol, side (BUY/SELL), price, quantity, type (PAS/AGG), and PnL impact.*
 
 Click the **FILLS** tab to see every trade execution.
 
@@ -564,6 +606,10 @@ curl "http://localhost:8000/api/backtest/{run_id}/trace?offset=0&limit=50"
 
 ### 13. Analysing Backtest Metrics
 
+![Backtest Metrics](docs/screenshots/14_backtest_metrics.png)
+
+*Backtest results showing performance metrics: Total PnL, Sharpe ratio, max drawdown, win rate, profit factor, and PnL curve.*
+
 After running a backtest, click the **METRICS** tab. The metrics panel displays:
 
 | Metric | Description |
@@ -584,6 +630,10 @@ After running a backtest, click the **METRICS** tab. The metrics panel displays:
 A **PnL sparkline** chart shows the cumulative PnL curve over time.
 
 ### 14. Using the Debug Trace
+
+![Debug Workspace](docs/screenshots/09_debug_with_strategy.png)
+
+*Debug workspace: order book + chart (top), per-tick debug trace (bottom-left), positions with mark-to-market PnL (bottom-center), fill history (bottom-right).*
 
 The **DEBUG TRACE** tab shows per-tick strategy decision data. Switch to the **Debug** workspace (press `4`) for the best view.
 
@@ -701,6 +751,8 @@ All panels in every workspace are **resizable** &mdash; drag the dividers betwee
 
 ### Trading Workspace (Press `1`)
 
+![Trading Workspace](docs/screenshots/01_trading_workspace.png)
+
 ```
 ┌───────────┬────────────────────────────────┬──────────────────┐
 │ ORDER     │         PRICE CHART            │   STRATEGY       │
@@ -719,6 +771,8 @@ All panels in every workspace are **resizable** &mdash; drag the dividers betwee
 
 ### Analysis Workspace (Press `2`)
 
+![Analysis Workspace](docs/screenshots/02_analysis_workspace.png)
+
 ```
 ┌────────────────────────────────────────────┬──────────────────┐
 │              PRICE CHART                   │   METRICS        │
@@ -733,6 +787,8 @@ All panels in every workspace are **resizable** &mdash; drag the dividers betwee
 ```
 
 ### Strategy Workspace (Press `3`)
+
+![Strategy Workspace](docs/screenshots/03_strategy_workspace.png)
 
 ```
 ┌──────────────────┬────────────────────────────────────────────┐
@@ -749,6 +805,8 @@ All panels in every workspace are **resizable** &mdash; drag the dividers betwee
 ```
 
 ### Debug Workspace (Press `4`)
+
+![Debug Workspace](docs/screenshots/04_debug_workspace.png)
 
 ```
 ┌───────────┬───────────────────────────────────────────────────┐
@@ -791,6 +849,10 @@ All indicators are computed client-side in the browser for instant updates. Each
 | **Ichimoku** | tenkan (9), kijun (26) | Ichimoku Cloud conversion line |
 | **KiJun** | period (default: 26) | Kijun-Sen base line |
 | **Cloud** | &mdash; | Ichimoku Cloud (Senkou Span A & B) |
+
+![Oscillator Indicators](docs/screenshots/12_indicator_oscillators.png)
+
+*Scrolled indicator list showing oscillator and volume categories with configurable parameters.*
 
 ### Oscillators (Separate Sub-Pane)
 
