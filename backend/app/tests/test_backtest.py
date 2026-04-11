@@ -3,7 +3,7 @@
 import pytest
 
 from app.engines.backtest.engine import BacktestEngine
-from app.models.backtest import BacktestConfig, ExecutionModel
+from app.models.backtest import BacktestConfig, TradeMatchingMode
 from app.models.events import Event, EventType
 from app.models.market import OrderSide
 
@@ -52,9 +52,6 @@ class _NoOpTrader:
 
 class _SimpleBuyTrader:
     """A strategy that buys 1 unit of X at best_ask on each tick."""
-    def __init__(self):
-        self._order_count = 0
-
     def run(self, state):
         from app.engines.sandbox.adapter import Order
         orders = {}
@@ -62,7 +59,6 @@ class _SimpleBuyTrader:
             depth = state.order_depths[product]
             if depth.sell_orders:
                 best_ask = min(depth.sell_orders.keys())
-                self._order_count += 1
                 orders[product] = [Order(product, best_ask, 1)]
         return orders, 0, ""
 
@@ -89,7 +85,6 @@ class _BuySellTrader:
 
 class _ReadTraderDataTrader:
     """Returns the incoming traderData so tests can assert initial parameters."""
-
     def __init__(self):
         self.first_trader_data: str | None = None
 
@@ -99,23 +94,8 @@ class _ReadTraderDataTrader:
         return {}, 0, state.traderData
 
 
-class _SinglePassiveBuyTrader:
-    """Places one passive buy then no-op."""
-
-    def __init__(self):
-        self._placed = False
-
-    def run(self, state):
-        from app.engines.sandbox.adapter import Order
-        if self._placed:
-            return {}, 0, ""
-        self._placed = True
-        return {"X": [Order("X", 98, 4)]}, 0, ""
-
-
 class _CaptureDepthTrader:
     """Captures order depth products for assertion."""
-
     def __init__(self):
         self.snapshots: list[dict[str, tuple[int, int]]] = []
 
@@ -136,7 +116,7 @@ class TestBasicBacktestRun:
         config = BacktestConfig(
             strategy_id="noop",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
@@ -157,7 +137,7 @@ class TestBasicBacktestRun:
         config = BacktestConfig(
             strategy_id="simple_buy",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
@@ -176,7 +156,7 @@ class TestBasicBacktestRun:
         config = BacktestConfig(
             strategy_id="param_seed",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
             parameters={"spread": 8, "order_size": 3},
         )
@@ -190,7 +170,7 @@ class TestBasicBacktestRun:
 
 
 # ======================================================================
-# PnL tracking
+# PnL tracking (cash-flow based)
 # ======================================================================
 
 class TestPnLTracking:
@@ -198,7 +178,7 @@ class TestPnLTracking:
         config = BacktestConfig(
             strategy_id="buy",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
@@ -210,30 +190,47 @@ class TestPnLTracking:
         engine.run(events, _SimpleBuyTrader())
         pnl_history = engine.get_pnl_history()
 
-        assert len(pnl_history) == 3  # one per BOOK_SNAPSHOT
+        assert len(pnl_history) == 3
         for snap in pnl_history:
             assert hasattr(snap, "total_pnl")
             assert hasattr(snap, "realized_pnl")
 
     def test_roundtrip_pnl(self):
-        """Buy then sell should produce realized PnL."""
+        """Buy then sell should produce fills and PnL."""
         config = BacktestConfig(
             strategy_id="roundtrip",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
         events = [
             _make_book_event(100, bid=99.0, ask=101.0),
-            _make_book_event(200, bid=104.0, ask=106.0),  # price moved up
+            _make_book_event(200, bid=104.0, ask=106.0),
         ]
         run = engine.run(events, _BuySellTrader())
 
         assert run.status == "completed"
         fills = engine.get_fills()
-        # Should have at least 2 fills (a buy and a sell)
         assert len(fills) >= 2
+
+    def test_cash_flow_pnl_buy(self):
+        """Buying 1 at 101 with mid 100 => cash = -101, total = -101 + 1*100 = -1."""
+        config = BacktestConfig(
+            strategy_id="buy",
+            products=["X"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"X": 20},
+        )
+        engine = BacktestEngine(config)
+        events = [_make_book_event(100, bid=99.0, ask=101.0)]
+        engine.run(events, _SimpleBuyTrader())
+
+        pnl = engine.get_pnl_history()[-1]
+        # Cash PnL = -101 (bought 1 at ask 101)
+        assert pnl.cash == pytest.approx(-101.0)
+        # Total PnL = -101 + 1 * 100 (mid) = -1
+        assert pnl.total_pnl == pytest.approx(-1.0)
 
 
 # ======================================================================
@@ -245,7 +242,7 @@ class TestFillRecording:
         config = BacktestConfig(
             strategy_id="buy",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
@@ -259,32 +256,41 @@ class TestFillRecording:
         assert fills[0].quantity == 1
 
 
-class TestPassiveFlowAndBookIsolation:
-    def test_trade_print_not_reused_on_next_book_snapshot(self):
+# ======================================================================
+# Single strategy call per timestamp
+# ======================================================================
+
+class TestSingleCallPerTimestamp:
+    def test_multi_product_same_timestamp(self):
+        """Two products at same timestamp should result in one strategy call."""
         config = BacktestConfig(
-            strategy_id="passive_once",
-            products=["X"],
-            execution_model=ExecutionModel.CONSERVATIVE,
-            position_limits={"X": 20},
+            strategy_id="capture",
+            products=["X", "Y"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"X": 20, "Y": 20},
         )
         engine = BacktestEngine(config)
+        trader = _CaptureDepthTrader()
         events = [
             _make_book_event(100, product="X", bid=99.0, ask=101.0),
-            _make_trade_event(110, product="X", price=98.0, quantity=3),
-            _make_book_event(120, product="X", bid=99.0, ask=101.0),
+            _make_book_event(100, product="Y", bid=49.0, ask=51.0),
         ]
-        engine.run(events, _SinglePassiveBuyTrader())
-        fills = engine.get_fills()
+        engine.run(events, trader)
 
-        assert len(fills) == 1
-        assert fills[0].quantity == 3
-        assert fills[0].timestamp == 110
+        # Should be called once (both products at timestamp 100)
+        assert len(trader.snapshots) == 1
+        assert "X" in trader.snapshots[0]
+        assert "Y" in trader.snapshots[0]
+        assert trader.snapshots[0]["X"] == (1, 1)
+        assert trader.snapshots[0]["Y"] == (1, 1)
 
-    def test_missing_product_book_is_not_substituted(self):
+
+class TestBookIsolation:
+    def test_missing_product_book_is_empty(self):
         config = BacktestConfig(
             strategy_id="capture_depth",
             products=["X", "Y"],
-            execution_model=ExecutionModel.CONSERVATIVE,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20, "Y": 20},
         )
         engine = BacktestEngine(config)
@@ -309,7 +315,7 @@ class TestDebugFrameGeneration:
         config = BacktestConfig(
             strategy_id="buy",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
@@ -327,7 +333,7 @@ class TestDebugFrameGeneration:
 
 
 # ======================================================================
-# Position tracking across events
+# Position tracking
 # ======================================================================
 
 class TestPositionTracking:
@@ -335,7 +341,7 @@ class TestPositionTracking:
         config = BacktestConfig(
             strategy_id="buy",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
@@ -346,7 +352,6 @@ class TestPositionTracking:
         ]
         engine.run(events, _SimpleBuyTrader())
 
-        # Each tick buys 1, so position should be 3 after 3 ticks
         pnl_history = engine.get_pnl_history()
         final_inventory = pnl_history[-1].inventory
         assert "X" in final_inventory
@@ -356,7 +361,7 @@ class TestPositionTracking:
         config = BacktestConfig(
             strategy_id="buy",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
@@ -367,9 +372,7 @@ class TestPositionTracking:
         engine.run(events, _SimpleBuyTrader())
         frames = engine.get_debug_frames()
 
-        # After first tick: position should be 1
         assert frames[0].position.get("X") == 1
-        # After second tick: position should be 2
         assert frames[1].position.get("X") == 2
 
 
@@ -386,15 +389,11 @@ class TestBacktestErrorHandling:
         config = BacktestConfig(
             strategy_id="crash",
             products=["X"],
-            execution_model=ExecutionModel.BALANCED,
+            trade_matching=TradeMatchingMode.ALL,
             position_limits={"X": 20},
         )
         engine = BacktestEngine(config)
         events = [_make_book_event(100)]
 
-        # The backtest engine catches strategy exceptions via the sandbox
-        # and continues; the run should still complete (sandbox returns
-        # empty orders on error).
         run = engine.run(events, _CrashingTrader())
-        # The run will either complete (sandbox caught it) or fail
         assert run.status in ("completed", "failed")

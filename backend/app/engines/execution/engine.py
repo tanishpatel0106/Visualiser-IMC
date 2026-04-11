@@ -1,531 +1,438 @@
 """Execution engine for the IMC Prosperity trading terminal.
 
-Simulates order execution against the visible order book. Supports three
-execution models (conservative, balanced, optimistic) that govern how
-passive (resting) orders are filled. Aggressive orders that cross the
-book are filled immediately at available prices.
+Implements the same order-matching semantics as the Prosperity exchange:
 
-The engine maintains a synthetic resting order book for passive orders
-and enforces position limits, fees, and slippage.
+1. **Book matching** – orders are matched against the visible order depth,
+   consuming volume level-by-level.  Buy orders fill at the *ask* price
+   (price improvement for the buyer); sell orders fill at the *bid* price.
+
+2. **Market-trade matching** – any remaining order quantity is matched
+   against market trades that occurred at the same timestamp.  Fill price
+   is the *order's* price (not the trade's price).
+
+Three trade-matching modes control phase 2:
+  ALL   – match trades at prices equal to or better than the order.
+  WORSE – only match trades strictly better than the order price.
+  NONE  – skip phase 2 entirely (book-only matching).
+
+Position limits are enforced in two stages:
+  • Aggregate pre-check: if any combination of pending orders could breach
+    the limit, ALL orders for that product are cancelled.
+  • Per-fill clamping: each individual fill is capped so that the position
+    never exceeds the limit.
 """
 
-import uuid
+from __future__ import annotations
 
-from app.models.backtest import ExecutionModel
-from app.models.market import (
-    BookLevel,
-    OrderSide,
-    OrderStatus,
-    OrderType,
-    TradePrint,
-    VisibleOrderBook,
-)
+from dataclasses import dataclass, field
+
+from app.models.backtest import TradeMatchingMode
+from app.models.market import OrderSide, TradePrint
 from app.models.trading import FillEvent, StrategyOrder
 
 
-class ExecutionEngine:
-    """Core simulation component that processes strategy orders against
-    market data and produces realistic fill events.
+# ------------------------------------------------------------------
+# MarketTrade wrapper – tracks consumed buy/sell capacity
+# ------------------------------------------------------------------
 
-    Aggressive orders (those that cross the current best bid/ask) are
-    matched immediately against the visible book, consuming liquidity
-    level-by-level. Passive orders are placed on an internal resting
-    book and filled later according to the configured execution model.
+@dataclass
+class MarketTrade:
+    """Wraps a raw TradePrint with mutable buy/sell capacity.
+
+    Both ``buy_quantity`` and ``sell_quantity`` start at the full trade
+    quantity.  When a strategy BUY order matches, it consumes
+    ``sell_quantity``; when a SELL order matches, it consumes
+    ``buy_quantity``.  This prevents the same trade from being
+    double-counted across multiple strategy orders.
+    """
+
+    symbol: str
+    price: float
+    quantity: int
+    buyer: str = ""
+    seller: str = ""
+    timestamp: int = 0
+    buy_quantity: int = 0
+    sell_quantity: int = 0
+
+    @classmethod
+    def from_trade_print(cls, tp: TradePrint) -> "MarketTrade":
+        return cls(
+            symbol=tp.symbol,
+            price=tp.price,
+            quantity=tp.quantity,
+            buyer=tp.buyer,
+            seller=tp.seller,
+            timestamp=tp.timestamp,
+            buy_quantity=tp.quantity,
+            sell_quantity=tp.quantity,
+        )
+
+
+# ------------------------------------------------------------------
+# Lightweight order-depth dict helpers
+# ------------------------------------------------------------------
+# The Prosperity OrderDepth uses:
+#   buy_orders:  dict[int, int]  – price → positive volume  (bids)
+#   sell_orders: dict[int, int]  – price → negative volume   (asks)
+# We work directly with these dicts so the engine stays decoupled
+# from the adapter's classes.
+
+
+class ExecutionEngine:
+    """Matches strategy orders against an order book and market trades.
 
     Parameters
     ----------
-    execution_model:
-        Governs how passive fills are determined.
+    trade_matching_mode:
+        Controls whether and how market trades participate in matching.
     position_limits:
-        Maps product -> max absolute position. Orders that would breach
-        the limit are rejected.
-    fees:
-        Per-unit fee applied to every fill.
-    slippage:
-        Additional per-unit adverse price adjustment on aggressive fills.
+        Product → max absolute position.  Products not listed use
+        *default_limit*.
+    default_limit:
+        Fallback position limit for unlisted products.
     """
 
     def __init__(
         self,
-        execution_model: ExecutionModel,
-        position_limits: dict[str, int],
-        fees: float = 0.0,
-        slippage: float = 0.0,
+        trade_matching_mode: TradeMatchingMode = TradeMatchingMode.ALL,
+        position_limits: dict[str, int] | None = None,
+        default_limit: int = 50,
     ) -> None:
-        self._execution_model = execution_model
-        self._position_limits = position_limits
-        self._fees = fees
-        self._slippage = slippage
+        self._mode = trade_matching_mode
+        self._position_limits = position_limits or {}
+        self._default_limit = default_limit
 
-        # order_id -> StrategyOrder for all orders that are resting passively
-        self._resting_orders: dict[str, StrategyOrder] = {}
-
-        # Tracks current net position per product (updated externally via
-        # update_position or internally when fills happen).
+        # Current net position per product (updated externally or via fills)
         self._positions: dict[str, int] = {}
 
-        # All orders ever submitted (for auditing / lookups)
-        self._all_orders: dict[str, StrategyOrder] = {}
-
     # ------------------------------------------------------------------
-    # Position tracking helpers
+    # Position helpers
     # ------------------------------------------------------------------
-
-    def update_position(self, product: str, quantity: int) -> None:
-        """Set the current net position for *product*."""
-        self._positions[product] = quantity
 
     def get_position(self, product: str) -> int:
-        """Return current net position for *product* (default 0)."""
         return self._positions.get(product, 0)
 
+    def update_position(self, product: str, quantity: int) -> None:
+        self._positions[product] = quantity
+
+    def get_limit(self, product: str) -> int:
+        return self._position_limits.get(product, self._default_limit)
+
     # ------------------------------------------------------------------
-    # Order submission
+    # Aggregate position-limit pre-check
     # ------------------------------------------------------------------
 
-    def process_order(
+    def enforce_limits(
         self,
-        order: StrategyOrder,
-        book: VisibleOrderBook,
-    ) -> list[FillEvent]:
-        """Process a new order against the current visible book.
+        orders_by_product: dict[str, list],
+    ) -> dict[str, list]:
+        """Cancel ALL orders for a product if the aggregate could breach limits.
 
-        Steps:
-        1. Validate the order and check position limits.
-        2. Determine whether the order is aggressive (crosses the book)
-           or passive (rests in the book).
-        3. For aggressive orders, walk through book levels to generate
-           fills, applying slippage.
-        4. For passive orders, insert into the internal resting book.
-        5. Apply fees to all generated fills.
+        This mirrors the Prosperity exchange rule: if the sum of all buy
+        quantities plus the current position exceeds the limit, *or* the
+        sum of all sell quantities would push the position below the
+        negative limit, every order for that product is dropped.
 
-        Returns a list of FillEvent objects (may be empty if the order
-        rests passively or is rejected).
+        Parameters
+        ----------
+        orders_by_product:
+            Product → list of Prosperity Order objects (with .quantity;
+            positive = buy, negative = sell).
+
+        Returns
+        -------
+        A *new* dict with the same keys, where products that failed the
+        check have an empty list.
         """
-        self._all_orders[order.order_id] = order
+        result: dict[str, list] = {}
+        for product, orders in orders_by_product.items():
+            limit = self.get_limit(product)
+            position = self.get_position(product)
 
-        # --- Position limit check ---
-        if not self._check_position_limit(order):
-            order.status = OrderStatus.REJECTED
-            return []
+            total_long = sum(o.quantity for o in orders if o.quantity > 0)
+            total_short = sum(-o.quantity for o in orders if o.quantity < 0)
 
-        fills: list[FillEvent] = []
+            if position + total_long > limit or position - total_short < -limit:
+                result[product] = []
+            else:
+                result[product] = list(orders)
 
-        # Determine aggressiveness
-        is_aggressive = self._is_aggressive(order, book)
-
-        if is_aggressive:
-            fills = self._match_aggressive(order, book)
-        else:
-            # Passive order: insert into resting book
-            order.status = OrderStatus.ACTIVE
-            self._resting_orders[order.order_id] = order
-
-        # If a market order got no fills at all, reject it
-        if order.order_type == OrderType.MARKET and not fills and is_aggressive:
-            order.status = OrderStatus.REJECTED
-
-        # If partially filled aggressive order has remaining qty, rest it
-        if fills and order.remaining_quantity > 0 and order.order_type == OrderType.LIMIT:
-            order.status = OrderStatus.PARTIAL_FILL
-            self._resting_orders[order.order_id] = order
-        elif fills and order.remaining_quantity == 0:
-            order.status = OrderStatus.FILLED
-
-        # Apply fees to all fills
-        for fill in fills:
-            fill.price = self._apply_fees(fill.price, fill.side)
-
-        return fills
+        return result
 
     # ------------------------------------------------------------------
-    # Passive fill checking
+    # Top-level matching entry point
     # ------------------------------------------------------------------
 
-    def check_passive_fills(
+    def match_orders(
         self,
-        book: VisibleOrderBook,
-        trades: list[TradePrint],
+        product: str,
+        orders: list,
+        buy_orders: dict[int, int],
+        sell_orders: dict[int, int],
+        market_trades: list[MarketTrade],
+        timestamp: int = 0,
     ) -> list[FillEvent]:
-        """Allocate each trade print's quantity globally across eligible
-        resting orders using price-time priority.
+        """Match all orders for a single product.
 
-        This method processes passive fills conservatively:
-        - A trade print can only be consumed once.
-        - Total passive fill quantity from one trade never exceeds the
-          printed trade quantity.
-        - If aggressor_side is known, side direction is enforced.
-        - If aggressor_side is missing, fallback is conservative
-          price-based eligibility.
+        Parameters
+        ----------
+        product:
+            The product symbol.
+        orders:
+            Prosperity Order objects (.symbol, .price, .quantity).
+            Positive quantity = buy, negative = sell.
+        buy_orders:
+            Order-depth bids: price → positive volume.
+        sell_orders:
+            Order-depth asks: price → negative volume (Prosperity convention).
+        market_trades:
+            MarketTrade wrappers for this timestamp.
+        timestamp:
+            Current simulation timestamp (used in fill events).
+
+        Returns
+        -------
+        List of FillEvent objects for all fills generated.
         """
-        fills: list[FillEvent] = []
-        for trade in trades:
-            fills.extend(self._allocate_passive_fills_for_trade(book, trade))
-        return fills
+        limit = self.get_limit(product)
+        all_fills: list[FillEvent] = []
+
+        for order in orders:
+            qty = order.quantity
+            if qty == 0:
+                continue
+
+            if qty > 0:
+                fills = self._match_buy_order(
+                    product=product,
+                    order=order,
+                    sell_orders=sell_orders,
+                    market_trades=market_trades,
+                    limit=limit,
+                    timestamp=timestamp,
+                )
+            else:
+                fills = self._match_sell_order(
+                    product=product,
+                    order=order,
+                    buy_orders=buy_orders,
+                    market_trades=market_trades,
+                    limit=limit,
+                    timestamp=timestamp,
+                )
+
+            all_fills.extend(fills)
+
+        return all_fills
 
     # ------------------------------------------------------------------
-    # Order cancellation
+    # Buy order matching
     # ------------------------------------------------------------------
 
-    def cancel_all_resting(self, products: list[str]) -> None:
-        """Cancel all resting orders for the given products.
-
-        In IMC Prosperity, each strategy tick's output replaces all
-        previous resting orders — there is no persistent order book
-        between ticks. This method implements that semantic.
-        """
-        to_remove = [
-            oid for oid, o in self._resting_orders.items()
-            if o.product in products
-        ]
-        for oid in to_remove:
-            order = self._resting_orders.pop(oid, None)
-            if order is not None:
-                order.status = OrderStatus.CANCELLED
-
-    def cancel_order(self, order_id: str) -> bool:
-        """Cancel a resting order. Returns True if the order was found
-        and cancelled, False otherwise."""
-        order = self._resting_orders.pop(order_id, None)
-        if order is not None:
-            order.status = OrderStatus.CANCELLED
-            return True
-
-        # Also check the master list in case it exists but is not resting
-        order = self._all_orders.get(order_id)
-        if order is not None and order.status in (OrderStatus.PENDING, OrderStatus.ACTIVE, OrderStatus.PARTIAL_FILL):
-            order.status = OrderStatus.CANCELLED
-            return True
-
-        return False
-
-    # ------------------------------------------------------------------
-    # Queries
-    # ------------------------------------------------------------------
-
-    def get_active_orders(self, product: str) -> list[StrategyOrder]:
-        """Return all resting orders for *product*."""
-        return [
-            o for o in self._resting_orders.values()
-            if o.product == product
-        ]
-
-    def get_all_active_orders(self) -> list[StrategyOrder]:
-        """Return all resting orders across all products."""
-        return list(self._resting_orders.values())
-
-    def reset(self) -> None:
-        """Clear all internal state."""
-        self._resting_orders.clear()
-        self._all_orders.clear()
-        self._positions.clear()
-
-    # ------------------------------------------------------------------
-    # Internal: aggressiveness detection
-    # ------------------------------------------------------------------
-
-    def _is_aggressive(self, order: StrategyOrder, book: VisibleOrderBook) -> bool:
-        """Determine whether an order would cross the current book.
-
-        A buy order is aggressive if its price >= best ask.
-        A sell order is aggressive if its price <= best bid.
-        Market orders are always aggressive.
-        """
-        if order.order_type == OrderType.MARKET:
-            return True
-
-        if order.side == OrderSide.BUY:
-            if book.best_ask is not None and order.price >= book.best_ask:
-                return True
-        else:
-            if book.best_bid is not None and order.price <= book.best_bid:
-                return True
-
-        return False
-
-    # ------------------------------------------------------------------
-    # Internal: aggressive matching
-    # ------------------------------------------------------------------
-
-    def _match_aggressive(
-        self, order: StrategyOrder, book: VisibleOrderBook
+    def _match_buy_order(
+        self,
+        product: str,
+        order,
+        sell_orders: dict[int, int],
+        market_trades: list[MarketTrade],
+        limit: int,
+        timestamp: int,
     ) -> list[FillEvent]:
-        """Walk the book and generate fills for an aggressive order.
+        """Match a buy order (positive quantity).
 
-        For a BUY order, consume ask levels from best (lowest) upward.
-        For a SELL order, consume bid levels from best (highest) downward.
-        Slippage is applied to each fill price.
+        Phase 1: against ask levels (sell_orders) with price <= order.price.
+                 Fills at the ask price (price improvement for buyer).
+        Phase 2: against market trades.
+                 Fills at the order's price.
         """
         fills: list[FillEvent] = []
         remaining = order.quantity
+        position = self.get_position(product)
 
-        if order.side == OrderSide.BUY:
-            levels = list(book.asks)  # ascending by price
-        else:
-            levels = list(book.bids)  # descending by price
+        # Phase 1: match against order book asks
+        # Sort ask prices ascending (best ask first)
+        eligible_asks = sorted(
+            [p for p in sell_orders if p <= order.price and sell_orders[p] != 0]
+        )
 
-        for level in levels:
+        for ask_price in eligible_asks:
             if remaining <= 0:
                 break
 
-            # For limit orders, do not fill beyond the limit price
-            if order.order_type == OrderType.LIMIT:
-                if order.side == OrderSide.BUY and level.price > order.price:
-                    break
-                if order.side == OrderSide.SELL and level.price < order.price:
-                    break
-
-            fill_qty = min(remaining, level.volume)
-            fill_price = self._apply_slippage(level.price, order.side)
-
-            fill = FillEvent(
-                order_id=order.order_id,
-                product=order.product,
-                side=order.side,
-                price=fill_price,
-                quantity=fill_qty,
-                timestamp=order.timestamp,
-                is_aggressive=True,
-            )
-            fills.append(fill)
-
-            remaining -= fill_qty
-
-        # Update order state
-        total_filled = sum(f.quantity for f in fills)
-        if total_filled > 0:
-            weighted_price = sum(f.price * f.quantity for f in fills) / total_filled
-            order.filled_quantity += total_filled
-            order.avg_fill_price = self._update_avg_price(
-                order.avg_fill_price,
-                order.filled_quantity - total_filled,
-                weighted_price,
-                total_filled,
-            )
-            order.updated_at = order.timestamp
-
-        return fills
-
-    # ------------------------------------------------------------------
-    # Internal: passive fill allocation
-    # ------------------------------------------------------------------
-    def _allocate_passive_fills_for_trade(
-        self,
-        book: VisibleOrderBook,
-        trade: TradePrint,
-    ) -> list[FillEvent]:
-        """Allocate a single trade print across eligible resting orders."""
-        if trade.symbol != book.product or trade.quantity <= 0:
-            return []
-
-        candidates = self._eligible_resting_orders_for_trade(trade)
-        if not candidates:
-            return []
-
-        remaining_trade_qty = trade.quantity
-        fills: list[FillEvent] = []
-        fully_filled_order_ids: list[str] = []
-
-        for order in candidates:
-            if remaining_trade_qty <= 0:
+            max_buy = max(0, limit - position)
+            if max_buy <= 0:
                 break
 
-            fill_qty = min(order.remaining_quantity, remaining_trade_qty)
-            fill_qty = self._apply_passive_position_limits(order, fill_qty)
+            # sell_orders values are negative (Prosperity convention)
+            available = abs(sell_orders[ask_price])
+            fill_qty = min(remaining, available, max_buy)
+
             if fill_qty <= 0:
                 continue
 
-            fill = FillEvent(
-                order_id=order.order_id,
-                product=order.product,
-                side=order.side,
-                price=self._apply_fees(order.price, order.side),
+            fills.append(FillEvent(
+                order_id="",
+                product=product,
+                side=OrderSide.BUY,
+                price=float(ask_price),  # Fill at the book's price
                 quantity=fill_qty,
-                timestamp=trade.timestamp,
-                is_aggressive=False,
-            )
-            fills.append(fill)
+                timestamp=timestamp,
+                is_aggressive=True,
+            ))
 
-            self._apply_order_fill(order, fill_qty, trade.timestamp)
-            self._apply_position_delta(order.product, order.side, fill_qty)
-            remaining_trade_qty -= fill_qty
+            position += fill_qty
+            remaining -= fill_qty
 
-            if order.remaining_quantity == 0:
-                fully_filled_order_ids.append(order.order_id)
+            # Consume volume from the order depth
+            sell_orders[ask_price] += fill_qty  # moves toward 0 (was negative)
+            if sell_orders[ask_price] == 0:
+                del sell_orders[ask_price]
 
-        for order_id in fully_filled_order_ids:
-            self._resting_orders.pop(order_id, None)
+        # Phase 2: match against market trades
+        if remaining > 0 and self._mode != TradeMatchingMode.NONE:
+            for mt in market_trades:
+                if remaining <= 0:
+                    break
+                if mt.sell_quantity <= 0:
+                    continue
+                if mt.price > order.price:
+                    continue
+                if self._mode == TradeMatchingMode.WORSE and mt.price == order.price:
+                    continue
 
+                max_buy = max(0, limit - position)
+                if max_buy <= 0:
+                    break
+
+                fill_qty = min(remaining, mt.sell_quantity, max_buy)
+                if fill_qty <= 0:
+                    continue
+
+                fills.append(FillEvent(
+                    order_id="",
+                    product=product,
+                    side=OrderSide.BUY,
+                    price=float(order.price),  # Fill at the order's price
+                    quantity=fill_qty,
+                    timestamp=timestamp,
+                    is_aggressive=False,
+                ))
+
+                position += fill_qty
+                remaining -= fill_qty
+                mt.sell_quantity -= fill_qty
+
+        # Update tracked position
+        self._positions[product] = position
         return fills
 
-    def _eligible_resting_orders_for_trade(
+    # ------------------------------------------------------------------
+    # Sell order matching
+    # ------------------------------------------------------------------
+
+    def _match_sell_order(
         self,
-        trade: TradePrint,
-    ) -> list[StrategyOrder]:
-        """Return eligible resting orders sorted by strict price-time
-        priority with deterministic tie-breaks."""
-        eligible = [
-            order
-            for order in self._resting_orders.values()
-            if order.product == trade.symbol
-            and order.remaining_quantity > 0
-            and self._trade_can_fill_order(trade, order)
-        ]
-
-        if not eligible:
-            return []
-
-        if self._target_order_side_for_trade(trade) == OrderSide.BUY:
-            # Better BUY price is higher.
-            eligible.sort(key=lambda o: (-o.price, o.timestamp, o.order_id))
-        elif self._target_order_side_for_trade(trade) == OrderSide.SELL:
-            # Better SELL price is lower.
-            eligible.sort(key=lambda o: (o.price, o.timestamp, o.order_id))
-        else:
-            # Unknown side fallback: still keep side-local price-time
-            # priority (BUY high->low, SELL low->high).
-            eligible.sort(
-                key=lambda o: (
-                    0 if o.side == OrderSide.BUY else 1,
-                    -o.price if o.side == OrderSide.BUY else o.price,
-                    o.timestamp,
-                    o.order_id,
-                )
-            )
-
-        return eligible
-
-    @staticmethod
-    def _target_order_side_for_trade(trade: TradePrint) -> str | None:
-        if trade.aggressor_side == OrderSide.SELL:
-            return OrderSide.BUY
-        if trade.aggressor_side == OrderSide.BUY:
-            return OrderSide.SELL
-        return None
-
-    def _trade_can_fill_order(self, trade: TradePrint, order: StrategyOrder) -> bool:
-        """Check side + price compatibility between one trade and one order."""
-        target_side = self._target_order_side_for_trade(trade)
-        if target_side is not None and order.side != target_side:
-            return False
-
-        # When aggressor side is known, enforce strict conservative
-        # price matching: we only fill at the traded level itself.
-        if target_side is not None:
-            return abs(trade.price - order.price) < 1e-9
-
-        # Fallback (unknown aggressor side): conservative price-based
-        # compatibility only.
-        if order.side == OrderSide.BUY:
-            return trade.price <= order.price
-        return trade.price >= order.price
-
-    def _apply_passive_position_limits(self, order: StrategyOrder, qty: int) -> int:
-        """Cap passive fill size so positions remain within limits."""
-        limit = self._position_limits.get(order.product)
-        if limit is None:
-            return qty
-
-        current_pos = self.get_position(order.product)
-        if order.side == OrderSide.BUY:
-            max_qty = max(0, limit - current_pos)
-        else:
-            max_qty = max(0, limit + current_pos)
-
-        return min(qty, max_qty)
-
-    def _apply_position_delta(self, product: str, side: OrderSide, qty: int) -> None:
-        current_pos = self.get_position(product)
-        if side == OrderSide.BUY:
-            self._positions[product] = current_pos + qty
-        else:
-            self._positions[product] = current_pos - qty
-
-    def _apply_order_fill(
-        self,
-        order: StrategyOrder,
-        fill_qty: int,
+        product: str,
+        order,
+        buy_orders: dict[int, int],
+        market_trades: list[MarketTrade],
+        limit: int,
         timestamp: int,
-    ) -> None:
-        previous_filled = order.filled_quantity
-        order.filled_quantity += fill_qty
-        order.avg_fill_price = self._update_avg_price(
-            order.avg_fill_price,
-            previous_filled,
-            order.price,
-            fill_qty,
+    ) -> list[FillEvent]:
+        """Match a sell order (negative quantity).
+
+        Phase 1: against bid levels (buy_orders) with price >= order.price.
+                 Fills at the bid price (price improvement for seller).
+        Phase 2: against market trades.
+                 Fills at the order's price.
+        """
+        fills: list[FillEvent] = []
+        remaining = abs(order.quantity)
+        position = self.get_position(product)
+
+        # Phase 1: match against order book bids
+        # Sort bid prices descending (best bid first)
+        sell_price = abs(order.price)
+        eligible_bids = sorted(
+            [p for p in buy_orders if p >= sell_price and buy_orders[p] > 0],
+            reverse=True,
         )
-        order.updated_at = timestamp
-        if order.remaining_quantity == 0:
-            order.status = OrderStatus.FILLED
-        else:
-            order.status = OrderStatus.PARTIAL_FILL
+
+        for bid_price in eligible_bids:
+            if remaining <= 0:
+                break
+
+            max_sell = max(0, limit + position)
+            if max_sell <= 0:
+                break
+
+            available = buy_orders[bid_price]
+            fill_qty = min(remaining, available, max_sell)
+
+            if fill_qty <= 0:
+                continue
+
+            fills.append(FillEvent(
+                order_id="",
+                product=product,
+                side=OrderSide.SELL,
+                price=float(bid_price),  # Fill at the book's price
+                quantity=fill_qty,
+                timestamp=timestamp,
+                is_aggressive=True,
+            ))
+
+            position -= fill_qty
+            remaining -= fill_qty
+
+            # Consume volume from the order depth
+            buy_orders[bid_price] -= fill_qty
+            if buy_orders[bid_price] == 0:
+                del buy_orders[bid_price]
+
+        # Phase 2: match against market trades
+        if remaining > 0 and self._mode != TradeMatchingMode.NONE:
+            for mt in market_trades:
+                if remaining <= 0:
+                    break
+                if mt.buy_quantity <= 0:
+                    continue
+                if mt.price < sell_price:
+                    continue
+                if self._mode == TradeMatchingMode.WORSE and mt.price == sell_price:
+                    continue
+
+                max_sell = max(0, limit + position)
+                if max_sell <= 0:
+                    break
+
+                fill_qty = min(remaining, mt.buy_quantity, max_sell)
+                if fill_qty <= 0:
+                    continue
+
+                fills.append(FillEvent(
+                    order_id="",
+                    product=product,
+                    side=OrderSide.SELL,
+                    price=float(abs(order.price)),  # Fill at the order's price
+                    quantity=fill_qty,
+                    timestamp=timestamp,
+                    is_aggressive=False,
+                ))
+
+                position -= fill_qty
+                remaining -= fill_qty
+                mt.buy_quantity -= fill_qty
+
+        # Update tracked position
+        self._positions[product] = position
+        return fills
 
     # ------------------------------------------------------------------
-    # Internal: position limit enforcement
+    # Reset
     # ------------------------------------------------------------------
 
-    def _check_position_limit(self, order: StrategyOrder) -> bool:
-        """Return True if the order is within position limits.
-
-        Checks whether filling the entire order quantity would cause
-        the net position to exceed the configured limit for the product.
-        If no limit is configured for the product, the order is allowed.
-        """
-        limit = self._position_limits.get(order.product)
-        if limit is None:
-            return True
-
-        current_pos = self.get_position(order.product)
-
-        if order.side == OrderSide.BUY:
-            projected = current_pos + order.quantity
-        else:
-            projected = current_pos - order.quantity
-
-        return abs(projected) <= limit
-
-    # ------------------------------------------------------------------
-    # Internal: fee and slippage adjustments
-    # ------------------------------------------------------------------
-
-    def _apply_slippage(self, price: float, side: OrderSide) -> float:
-        """Apply slippage to an aggressive fill price.
-
-        Slippage makes the fill price worse for the trader:
-        - BUY: price increases (pay more)
-        - SELL: price decreases (receive less)
-        """
-        if side == OrderSide.BUY:
-            return price + self._slippage
-        else:
-            return price - self._slippage
-
-    def _apply_fees(self, price: float, side: OrderSide) -> float:
-        """Apply per-unit fees to a fill price.
-
-        Fees make the effective price worse for the trader:
-        - BUY: price increases
-        - SELL: price decreases
-        """
-        if side == OrderSide.BUY:
-            return price + self._fees
-        else:
-            return price - self._fees
-
-    # ------------------------------------------------------------------
-    # Internal: utility
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _update_avg_price(
-        current_avg: float,
-        current_qty: int,
-        new_price: float,
-        new_qty: int,
-    ) -> float:
-        """Compute a running weighted-average fill price."""
-        total_qty = current_qty + new_qty
-        if total_qty == 0:
-            return 0.0
-        return (current_avg * current_qty + new_price * new_qty) / total_qty
+    def reset(self) -> None:
+        """Clear all internal state."""
+        self._positions.clear()

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.core.deps import get_dataset_service, get_storage
-from app.models.backtest import BacktestConfig
+from app.models.backtest import BacktestConfig, _map_execution_model
 from app.services.backtest_service import BacktestService
 from app.services.dataset_service import DatasetService
 from app.storage.database import StorageService
@@ -22,11 +22,13 @@ class RunRequest(BaseModel):
     source_code: str
     products: list[str] = []
     days: list[int] = []
-    execution_model: str = "BALANCED"
+    trade_matching: str = "ALL"
     position_limits: dict[str, int] = {}
+    initial_cash: float = 0.0
+    # Legacy fields (accepted for backward compat, mapped to trade_matching)
+    execution_model: str = "BALANCED"
     fees: float = 0.0
     slippage: float = 0.0
-    initial_cash: float = 0.0
 
 
 class CompareRequest(BaseModel):
@@ -54,14 +56,14 @@ def run_backtest(
     svc: BacktestService = Depends(_get_backtest_service),
 ):
     """Execute a backtest and return the run summary."""
+    # Use trade_matching if explicitly set, otherwise map from execution_model
+    trade_matching = _map_execution_model(req.trade_matching or req.execution_model)
     config = BacktestConfig(
         strategy_id=req.strategy_id,
         products=req.products,
         days=req.days,
-        execution_model=req.execution_model,
+        trade_matching=trade_matching,
         position_limits=req.position_limits,
-        fees=req.fees,
-        slippage=req.slippage,
         initial_cash=req.initial_cash,
     )
     try:

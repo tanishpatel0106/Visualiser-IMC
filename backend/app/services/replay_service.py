@@ -1,15 +1,16 @@
 """High-level replay service that bridges the API layer to the replay engine."""
 
 import logging
+from collections import defaultdict
 from typing import Any, Optional
 
 from app.engines.replay.engine import ReplayEngine
 from app.engines.replay.state import ReplayState
 from app.engines.sandbox.runner import StrategySandbox
 from app.engines.sandbox.adapter import ProsperityAdapter
-from app.engines.execution.engine import ExecutionEngine
+from app.engines.execution.engine import ExecutionEngine, MarketTrade
 from app.engines.strategies.registry import StrategyRegistry
-from app.models.backtest import ExecutionModel
+from app.models.backtest import TradeMatchingMode, _map_execution_model
 from app.models.events import EventType
 from app.models.market import OrderSide, VisibleOrderBook, TradePrint
 from app.services.dataset_service import DatasetService
@@ -33,7 +34,7 @@ class ReplayService:
         self._dataset = dataset_service
         self._state = ReplayState()
 
-        # Strategy execution state (populated when replay started with strategy)
+        # Strategy execution state
         self._strategy_active = False
         self._strategy_instance: Any = None
         self._execution_engine: Optional[ExecutionEngine] = None
@@ -41,14 +42,16 @@ class ReplayService:
         self._sandbox = StrategySandbox()
         self._trader_data: str = ""
         self._products: list[str] = []
-        self._strategy_positions: dict[str, int] = {}
-        self._strategy_own_trades: dict[str, list[TradePrint]] = {}
-        self._strategy_market_trades: dict[str, list[TradePrint]] = {}
+
+        # Positions and cash-flow PnL (matching backtest engine approach)
+        self._positions: dict[str, int] = {}
+        self._profit_loss: dict[str, float] = {}
+        self._mid_prices: dict[str, float] = {}
+
+        # Trade buffers
+        self._own_trades: dict[str, list[TradePrint]] = {}
+        self._market_trades: dict[str, list[TradePrint]] = {}
         self._strategy_fills: list[dict] = []
-        self._strategy_pnl: dict = {}
-        self._strategy_cash: float = 0.0
-        self._strategy_realized_pnl: dict[str, float] = {}
-        self._strategy_avg_entry: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -77,14 +80,12 @@ class ReplayService:
         self._strategy_instance = None
         self._execution_engine = None
         self._trader_data = ""
-        self._strategy_positions = {p: 0 for p in products}
-        self._strategy_own_trades = {p: [] for p in products}
-        self._strategy_market_trades = {p: [] for p in products}
+        self._positions = {p: 0 for p in products}
+        self._profit_loss = {p: 0.0 for p in products}
+        self._mid_prices = {}
+        self._own_trades = {p: [] for p in products}
+        self._market_trades = {p: [] for p in products}
         self._strategy_fills = []
-        self._strategy_pnl = {}
-        self._strategy_cash = 0.0
-        self._strategy_realized_pnl = {p: 0.0 for p in products}
-        self._strategy_avg_entry = {p: 0.0 for p in products}
 
         # If strategy_id is provided, set up strategy execution
         if strategy_id:
@@ -123,10 +124,8 @@ class ReplayService:
         source_code: Optional[str] = None
 
         if strat_def is not None:
-            # Built-in strategy from registry
             source_code = strat_def.source_code
         else:
-            # Check uploaded strategies in storage (database)
             storage = get_storage()
             stored = storage.get_strategy(strategy_id)
             if stored is not None:
@@ -135,16 +134,14 @@ class ReplayService:
         if source_code is None:
             raise ValueError(f"Strategy '{strategy_id}' not found")
 
-        # Load the strategy
         self._strategy_instance = self._sandbox.load_strategy(source_code)
 
-        # Create execution engine
-        exec_model = ExecutionModel(execution_model)
+        # Map legacy execution_model to TradeMatchingMode
+        trade_matching = _map_execution_model(execution_model)
+
         self._execution_engine = ExecutionEngine(
-            execution_model=exec_model,
+            trade_matching_mode=trade_matching,
             position_limits=position_limits or {},
-            fees=0.0,
-            slippage=0.0,
         )
 
         self._strategy_active = True
@@ -156,11 +153,7 @@ class ReplayService:
         return self._engine.get_session_state()
 
     def step_forward(self) -> dict:
-        """Step one event forward and return event + state snapshot.
-
-        If a strategy is active, also runs the strategy on BOOK_SNAPSHOT
-        events and processes its orders through the execution engine.
-        """
+        """Step one event forward and return event + state snapshot."""
         event = self._engine.step_forward()
         if event is None:
             return {"done": True, **self._engine.get_session_state()}
@@ -180,13 +173,11 @@ class ReplayService:
             strategy_state = self._run_strategy_step(event)
             if strategy_state:
                 result["strategy_state"] = strategy_state
-                # Merge strategy PnL into main state so frontend picks it up
                 if "pnl" in strategy_state:
                     result["state"]["pnl"] = strategy_state["pnl"]
                 if "positions" in strategy_state:
                     result["state"]["positions"] = self._build_strategy_positions()
                 if "fills" in strategy_state and strategy_state["fills"]:
-                    # Use trade_tape key (what get_state_snapshot returns), NOT trades
                     existing_trades = result["state"].get("trade_tape", [])
                     fill_trades = []
                     for f in strategy_state["fills"]:
@@ -199,17 +190,20 @@ class ReplayService:
                             "buyer": "SUBMISSION" if f.get("side") == "BUY" else "",
                             "seller": "SUBMISSION" if f.get("side") == "SELL" else "",
                         })
-                    result["state"]["trade_tape"] = (existing_trades + fill_trades) if isinstance(existing_trades, list) else fill_trades
+                    result["state"]["trade_tape"] = (
+                        (existing_trades + fill_trades)
+                        if isinstance(existing_trades, list)
+                        else fill_trades
+                    )
         elif self._strategy_active:
-            # On ALL non-BOOK_SNAPSHOT events, send current strategy PnL AND positions
-            pnl = self._compute_strategy_pnl(self._state.books, event.timestamp)
+            pnl = self._compute_strategy_pnl(event.timestamp)
             result["state"]["pnl"] = pnl
             result["state"]["positions"] = self._build_strategy_positions()
 
         # Accumulate market trades for strategy context
         if self._strategy_active and event.event_type == EventType.TRADE_PRINT:
             product = event.product or event.data.get("symbol", "")
-            if product in self._strategy_market_trades:
+            if product in self._market_trades:
                 trade = TradePrint(
                     timestamp=event.timestamp,
                     buyer=event.data.get("buyer", ""),
@@ -220,63 +214,20 @@ class ReplayService:
                     quantity=event.data.get("quantity", 0),
                     aggressor_side=event.data.get("aggressor_side"),
                 )
-                self._strategy_market_trades[product].append(trade)
-                # Keep only last 50 trades per product
-                if len(self._strategy_market_trades[product]) > 50:
-                    self._strategy_market_trades[product] = self._strategy_market_trades[product][-50:]
+                self._market_trades[product].append(trade)
+                if len(self._market_trades[product]) > 50:
+                    self._market_trades[product] = self._market_trades[product][-50:]
 
         return result
-
-    def _process_fill(self, fill, timestamp: int) -> dict:
-        """Process a single fill: update positions, own trades, PnL. Returns fill dict."""
-        is_buy = fill.side == OrderSide.BUY
-
-        fill_dict = {
-            "order_id": fill.order_id,
-            "product": fill.product,
-            "side": fill.side.value if hasattr(fill.side, 'value') else ("BUY" if is_buy else "SELL"),
-            "price": fill.price,
-            "quantity": fill.quantity,
-            "timestamp": fill.timestamp or timestamp,
-            "is_aggressive": fill.is_aggressive,
-        }
-        self._strategy_fills.append(fill_dict)
-
-        # Update positions: BUY adds, SELL subtracts
-        signed_qty = fill.quantity if is_buy else -fill.quantity
-        old_pos = self._strategy_positions.get(fill.product, 0)
-        new_pos = old_pos + signed_qty
-        self._strategy_positions[fill.product] = new_pos
-        self._execution_engine.update_position(fill.product, new_pos)
-
-        # Track own trades for next strategy call
-        own_trade = TradePrint(
-            timestamp=fill.timestamp or timestamp,
-            buyer="SUBMISSION" if is_buy else "",
-            seller="" if is_buy else "SUBMISSION",
-            symbol=fill.product,
-            price=fill.price,
-            quantity=fill.quantity,
-        )
-        if fill.product not in self._strategy_own_trades:
-            self._strategy_own_trades[fill.product] = []
-        self._strategy_own_trades[fill.product].append(own_trade)
-
-        # Update PnL tracking
-        self._update_strategy_pnl(fill, old_pos)
-
-        return fill_dict
 
     def _run_strategy_step(self, event) -> Optional[dict]:
         """Execute the strategy against the current book state and return results.
 
-        Flow (matches Prosperity semantics):
-        1. Check passive fills on EXISTING resting orders against the NEW book
-           (orders placed on tick N are evaluated against tick N+1's book)
-        2. Cancel remaining unfilled resting orders
-        3. Run the strategy to get new orders
-        4. Process new orders: aggressive fills happen immediately,
-           passive orders rest until the next tick
+        Uses the same matching logic as BacktestEngine:
+        1. Build state from all products' books.
+        2. Run strategy once.
+        3. Enforce limits + match orders against book + market trades.
+        4. Update cash-flow PnL.
         """
         if not self._strategy_instance or not self._execution_engine:
             return None
@@ -286,80 +237,92 @@ class ReplayService:
             timestamp = event.timestamp
             step_fills = []
 
-            # ── Step 1: Check passive fills on EXISTING resting orders ──
-            # Orders from the PREVIOUS tick are checked against the CURRENT book.
-            # This is the correct Prosperity flow: orders placed on tick N
-            # get evaluated for fills when tick N+1's book arrives.
-            for product in self._products:
-                book = books.get(product)
-                if book is None:
-                    continue
-                recent = self._strategy_market_trades.get(product, [])
-                passive_fills = self._execution_engine.check_passive_fills(book, recent)
-                for fill in passive_fills:
-                    fd = self._process_fill(fill, timestamp)
-                    step_fills.append(fd)
+            # Update mid prices
+            for p in self._products:
+                book = books.get(p)
+                if book is not None and book.mid_price is not None:
+                    self._mid_prices[p] = book.mid_price
 
-            # ── Step 2: Cancel remaining resting orders (Prosperity semantics) ──
-            self._execution_engine.cancel_all_resting(self._products)
-
-            # ── Step 3: Build state and run strategy ──
+            # Build state and run strategy
             trading_state = self._adapter.build_state(
                 timestamp=timestamp,
                 products=self._products,
                 books=books,
-                positions=self._strategy_positions,
-                own_trades=self._strategy_own_trades,
-                market_trades=self._strategy_market_trades,
+                positions=self._positions,
+                own_trades=self._own_trades,
+                market_trades=self._market_trades,
                 trader_data=self._trader_data,
             )
 
             raw_orders, conversions, trader_data = self._sandbox.execute_strategy(
-                self._strategy_instance,
-                trading_state,
+                self._strategy_instance, trading_state,
             )
-            self._trader_data = trader_data if isinstance(trader_data, str) and not trader_data.startswith("ERROR:") else self._trader_data
+            if isinstance(trader_data, str) and not trader_data.startswith("ERROR:"):
+                self._trader_data = trader_data
 
-            # ── Step 4: Parse and process new orders ──
-            orders = self._adapter.parse_orders(
-                raw_orders if isinstance(raw_orders, dict) else {},
-                timestamp=timestamp,
-            )
+            # Clear own trades (strategy has seen them)
+            for p in self._products:
+                self._own_trades[p] = []
+
+            # Parse and match orders
+            if not isinstance(raw_orders, dict):
+                raw_orders = {}
+
+            checked_orders = self._execution_engine.enforce_limits(raw_orders)
 
             orders_submitted = []
-            for order in orders:
-                orders_submitted.append({
-                    "order_id": order.order_id,
-                    "product": order.product,
-                    "side": order.side.value if hasattr(order.side, 'value') else str(order.side),
-                    "price": order.price,
-                    "quantity": order.quantity,
-                })
+            for product, orders in checked_orders.items():
+                if not orders:
+                    continue
 
-                book = books.get(order.product)
+                for order in orders:
+                    qty = getattr(order, "quantity", 0)
+                    if qty == 0:
+                        continue
+                    orders_submitted.append({
+                        "product": product,
+                        "side": "BUY" if qty > 0 else "SELL",
+                        "price": getattr(order, "price", 0),
+                        "quantity": abs(qty),
+                    })
+
+                book = books.get(product)
                 if book is None:
                     continue
 
-                # Aggressive orders fill immediately; passive orders go to resting book
-                fills = self._execution_engine.process_order(
-                    order, book
+                # Build mutable order depth
+                buy_depth: dict[int, int] = {}
+                sell_depth: dict[int, int] = {}
+                for level in book.bids:
+                    buy_depth[int(level.price)] = level.volume
+                for level in book.asks:
+                    sell_depth[int(level.price)] = -level.volume
+
+                # Wrap recent trades as MarketTrade
+                recent_trades = [
+                    MarketTrade.from_trade_print(t)
+                    for t in self._market_trades.get(product, [])
+                ]
+
+                fills = self._execution_engine.match_orders(
+                    product=product,
+                    orders=orders,
+                    buy_orders=buy_depth,
+                    sell_orders=sell_depth,
+                    market_trades=recent_trades,
+                    timestamp=timestamp,
                 )
 
                 for fill in fills:
                     fd = self._process_fill(fill, timestamp)
                     step_fills.append(fd)
 
-            # Clear own trades after strategy consumed them (Prosperity semantics)
-            for p in self._products:
-                self._strategy_own_trades[p] = []
-
-            # Compute current PnL
-            pnl = self._compute_strategy_pnl(books, timestamp)
+            pnl = self._compute_strategy_pnl(timestamp)
 
             return {
                 "orders_submitted": orders_submitted,
                 "fills": step_fills,
-                "positions": dict(self._strategy_positions),
+                "positions": dict(self._positions),
                 "pnl": pnl,
                 "total_fills": len(self._strategy_fills),
             }
@@ -370,95 +333,94 @@ class ReplayService:
                 "error": str(exc),
                 "orders_submitted": [],
                 "fills": [],
-                "positions": dict(self._strategy_positions),
-                "pnl": self._compute_strategy_pnl(self._state.books, event.timestamp),
+                "positions": dict(self._positions),
+                "pnl": self._compute_strategy_pnl(event.timestamp),
                 "total_fills": len(self._strategy_fills),
             }
 
-    def _update_strategy_pnl(self, fill, old_pos: int) -> None:
-        """Update realized PnL when a fill reduces/flips the position."""
+    def _process_fill(self, fill, timestamp: int) -> dict:
+        """Process a fill: update positions and cash-flow PnL."""
+        is_buy = fill.side == OrderSide.BUY
         product = fill.product
-        is_buy = fill.side == OrderSide.BUY or (hasattr(fill.side, 'value') and fill.side.value == "BUY")
-        signed_qty = fill.quantity if is_buy else -fill.quantity
-        new_pos = old_pos + signed_qty
 
-        if old_pos == 0:
-            self._strategy_avg_entry[product] = fill.price
-        elif (old_pos > 0 and signed_qty > 0) or (old_pos < 0 and signed_qty < 0):
-            # Adding to position
-            total_cost = self._strategy_avg_entry.get(product, 0.0) * abs(old_pos) + fill.price * abs(signed_qty)
-            self._strategy_avg_entry[product] = total_cost / abs(new_pos) if new_pos != 0 else 0.0
+        fill_dict = {
+            "order_id": getattr(fill, "order_id", ""),
+            "product": product,
+            "side": fill.side.value if hasattr(fill.side, "value") else ("BUY" if is_buy else "SELL"),
+            "price": fill.price,
+            "quantity": fill.quantity,
+            "timestamp": fill.timestamp or timestamp,
+            "is_aggressive": fill.is_aggressive,
+        }
+        self._strategy_fills.append(fill_dict)
+
+        # Cash-flow PnL update
+        if is_buy:
+            self._profit_loss[product] = self._profit_loss.get(product, 0.0) - fill.price * fill.quantity
+            self._positions[product] = self._positions.get(product, 0) + fill.quantity
         else:
-            # Reducing/flipping
-            closed_qty = min(abs(signed_qty), abs(old_pos))
-            avg_entry = self._strategy_avg_entry.get(product, 0.0)
-            if old_pos > 0:
-                realized = (fill.price - avg_entry) * closed_qty
-            else:
-                realized = (avg_entry - fill.price) * closed_qty
-            self._strategy_realized_pnl[product] = self._strategy_realized_pnl.get(product, 0.0) + realized
-            self._strategy_cash += realized
+            self._profit_loss[product] = self._profit_loss.get(product, 0.0) + fill.price * fill.quantity
+            self._positions[product] = self._positions.get(product, 0) - fill.quantity
 
-            if abs(signed_qty) > abs(old_pos):
-                self._strategy_avg_entry[product] = fill.price
+        self._execution_engine.update_position(product, self._positions[product])
+
+        # Buffer as own trade
+        own_trade = TradePrint(
+            timestamp=fill.timestamp or timestamp,
+            buyer="SUBMISSION" if is_buy else "",
+            seller="" if is_buy else "SUBMISSION",
+            symbol=product,
+            price=fill.price,
+            quantity=fill.quantity,
+        )
+        if product not in self._own_trades:
+            self._own_trades[product] = []
+        self._own_trades[product].append(own_trade)
+
+        return fill_dict
 
     def _build_strategy_positions(self) -> dict:
-        """Build position dict from current strategy state for frontend."""
+        """Build position dict for frontend."""
         pos_dict = {}
-        for p, q in self._strategy_positions.items():
-            book = self._state.books.get(p)
-            mid = book.mid_price if book else 0.0
-            avg_entry = self._strategy_avg_entry.get(p, 0.0)
-            if q > 0 and mid:
-                unrealized = (mid - avg_entry) * q
-            elif q < 0 and mid:
-                unrealized = (avg_entry - mid) * abs(q)
-            else:
-                unrealized = 0.0
+        for p, q in self._positions.items():
+            mid = self._mid_prices.get(p, 0.0)
+            cash_pnl = self._profit_loss.get(p, 0.0)
+            product_pnl = cash_pnl + q * mid
+            unrealized = product_pnl - cash_pnl
+
             pos_dict[p] = {
                 "product": p,
                 "quantity": q,
-                "avg_entry_price": round(avg_entry, 2),
+                "avg_entry_price": 0.0,  # Not tracked in cash-flow model
                 "mark_price": round(mid, 2) if mid else 0.0,
                 "unrealized_pnl": round(unrealized, 2),
-                "realized_pnl": round(self._strategy_realized_pnl.get(p, 0.0), 2),
-                "position_limit": 20,
+                "realized_pnl": round(cash_pnl, 2),
+                "position_limit": self._execution_engine.get_limit(p) if self._execution_engine else 20,
             }
         return pos_dict
 
-    def _compute_strategy_pnl(self, books: dict[str, VisibleOrderBook], timestamp: int) -> dict:
-        """Compute current strategy PnL from positions and books."""
-        total_realized = sum(self._strategy_realized_pnl.values())
-        total_unrealized = 0.0
-        for product, pos in self._strategy_positions.items():
-            if pos == 0:
-                continue
-            book = books.get(product)
-            mid = book.mid_price if book else None
-            if mid is None:
-                continue
-            avg_entry = self._strategy_avg_entry.get(product, 0.0)
-            if pos > 0:
-                total_unrealized += (mid - avg_entry) * pos
-            else:
-                total_unrealized += (avg_entry - mid) * abs(pos)
+    def _compute_strategy_pnl(self, timestamp: int) -> dict:
+        """Compute mark-to-market PnL (same as backtest engine)."""
+        total_pnl = 0.0
+        total_cash = sum(self._profit_loss.values())
+
+        for product in self._positions:
+            cash = self._profit_loss.get(product, 0.0)
+            pos = self._positions.get(product, 0)
+            mid = self._mid_prices.get(product, 0.0)
+            total_pnl += cash + pos * mid
 
         return {
             "timestamp": timestamp,
-            "realized_pnl": round(total_realized, 2),
-            "unrealized_pnl": round(total_unrealized, 2),
-            "total_pnl": round(total_realized + total_unrealized, 2),
-            "inventory": {p: q for p, q in self._strategy_positions.items() if q != 0},
-            "cash": round(self._strategy_cash, 2),
+            "realized_pnl": round(total_cash, 2),
+            "unrealized_pnl": round(total_pnl - total_cash, 2),
+            "total_pnl": round(total_pnl, 2),
+            "inventory": {p: q for p, q in self._positions.items() if q != 0},
+            "cash": round(total_cash, 2),
         }
 
     def step_backward(self) -> dict:
-        """Step one event backward.
-
-        Note: backward stepping returns the event at the new position
-        but does NOT reverse state changes. A full state reconstruction
-        would require replaying from the beginning up to the new cursor.
-        """
+        """Step one event backward."""
         event = self._engine.step_backward()
         if event is None:
             return {"done": True, **self._engine.get_session_state()}
@@ -470,16 +432,11 @@ class ReplayService:
         }
 
     def seek(self, timestamp: int) -> dict:
-        """Seek to the nearest event at the given timestamp.
-
-        Rebuilds state by replaying all events from the beginning up to
-        the new cursor position.
-        """
+        """Seek to the nearest event at the given timestamp."""
         event = self._engine.seek(timestamp)
         if event is None:
             return {"error": "Empty event stream"}
 
-        # Rebuild state up to current position
         self._state.reset()
         for ev in self._engine.get_events_up_to_current():
             self._state.process_event(ev)
@@ -491,18 +448,15 @@ class ReplayService:
         }
 
     def set_speed(self, speed: float) -> None:
-        """Set the playback speed multiplier."""
         self._engine.set_speed(speed)
 
     def get_state(self) -> dict:
-        """Return the current engine + world state."""
         return {
             "engine": self._engine.get_session_state(),
             "state": self._state.get_state_snapshot(),
         }
 
     def reset(self) -> None:
-        """Full reset of engine and state."""
         self._engine.stop()
         self._state.reset()
 
@@ -511,12 +465,10 @@ class ReplayService:
     # ------------------------------------------------------------------
 
     def jump_next_trade(self) -> dict:
-        """Jump to the next TRADE_PRINT event."""
         event = self._engine.jump_to_next_trade()
         if event is None:
             return {"done": True, **self._engine.get_session_state()}
 
-        # Replay state up to new position
         self._state.reset()
         for ev in self._engine.get_events_up_to_current():
             self._state.process_event(ev)
@@ -529,7 +481,6 @@ class ReplayService:
         }
 
     def jump_next_fill(self) -> dict:
-        """Jump to the next FILL event."""
         event = self._engine.jump_to_next_fill()
         if event is None:
             return {"done": True, **self._engine.get_session_state()}
@@ -546,7 +497,7 @@ class ReplayService:
         }
 
     # ------------------------------------------------------------------
-    # Accessors for WebSocket streaming
+    # Accessors
     # ------------------------------------------------------------------
 
     @property

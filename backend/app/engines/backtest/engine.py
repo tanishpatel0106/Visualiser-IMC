@@ -1,24 +1,32 @@
 """Backtest engine for the IMC Prosperity trading terminal.
 
-Orchestrates the full backtest lifecycle: iterates through historical
-market events, feeds them to a strategy via the Prosperity adapter,
-processes resulting orders through the execution engine, tracks
-positions, inventory, and PnL, and produces a complete BacktestRun
-with debug frames and performance metrics.
+Implements Prosperity-accurate backtesting semantics based on the
+reference backtester (nabayansaha/imc-prosperity-4-backtester):
+
+• Strategy is called **once per timestamp** with all products' state.
+• Orders are matched against the order book (consuming volume) and
+  then against market trades, with configurable matching modes.
+• PnL uses simple cash-flow accounting:
+    profit_loss[product] -= price * volume   (for buys)
+    profit_loss[product] += price * volume   (for sells)
+  Mark-to-market: total_pnl = sum(profit_loss[p] + position[p] * mid_price[p])
+• Position limits use aggregate pre-check + per-fill clamping.
 """
 
+import copy
 import math
 import json
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
-from app.engines.execution.engine import ExecutionEngine
+from app.engines.execution.engine import ExecutionEngine, MarketTrade
 from app.engines.orderbook.book import OrderBookEngine
 from app.engines.sandbox.adapter import ProsperityAdapter
 from app.engines.sandbox.runner import StrategySandbox
 from app.models.analytics import ExecutionMetrics, PerformanceMetrics
-from app.models.backtest import BacktestConfig, BacktestRun, ExecutionModel
+from app.models.backtest import BacktestConfig, BacktestRun
 from app.models.events import Event, EventType
 from app.models.market import (
     MarketSnapshot,
@@ -29,9 +37,7 @@ from app.models.market import (
 from app.models.strategy import DebugFrame
 from app.models.trading import (
     FillEvent,
-    InventoryState,
     PnLState,
-    PositionState,
     StrategyOrder,
 )
 
@@ -39,24 +45,14 @@ from app.models.trading import (
 class BacktestEngine:
     """Drives a full backtest run against historical event data.
 
-    The engine replays events in chronological order. On each
-    BOOK_SNAPSHOT event it:
-
-    1. Updates the internal order book via OrderBookEngine.
-    2. Checks for passive fills on any resting orders.
-    3. Builds a Prosperity-compatible TradingState.
-    4. Calls the strategy's ``run`` method.
-    5. Processes the strategy's orders through ExecutionEngine.
-    6. Updates positions, PnL, and debug frames.
-
-    TRADE_PRINT events update the recent-trade buffer and are also
-    checked for passive fills.
-
-    Parameters
-    ----------
-    config : BacktestConfig
-        Full backtest configuration (strategy, products, execution model,
-        position limits, fees, slippage, etc.).
+    The engine groups events by timestamp and for each timestamp:
+    1. Updates order books from all BOOK_SNAPSHOT events.
+    2. Collects market trades from all TRADE_PRINT events.
+    3. Builds a Prosperity-compatible TradingState (all products).
+    4. Calls the strategy's ``run`` method **once**.
+    5. Enforces position limits (aggregate pre-check).
+    6. Matches orders against order book + market trades.
+    7. Updates positions and cash-flow PnL.
     """
 
     def __init__(self, config: BacktestConfig) -> None:
@@ -65,18 +61,15 @@ class BacktestEngine:
         # Core sub-engines
         self._book_engine = OrderBookEngine()
         self._execution_engine = ExecutionEngine(
-            execution_model=config.execution_model,
+            trade_matching_mode=config.get_trade_matching(),
             position_limits=config.position_limits,
-            fees=config.fees,
-            slippage=config.slippage,
+            default_limit=50,
         )
         self._adapter = ProsperityAdapter()
 
-        # State accumulators
-        self._positions: dict[str, int] = {}          # product -> net qty
-        self._avg_entry_prices: dict[str, float] = {} # product -> avg entry
-        self._cash: float = config.initial_cash
-        self._realized_pnl: dict[str, float] = {}     # product -> realized pnl
+        # Position and PnL tracking (cash-flow based, like Prosperity)
+        self._positions: dict[str, int] = {}
+        self._profit_loss: dict[str, float] = {}  # cash PnL per product
 
         # Result collectors
         self._fills: list[FillEvent] = []
@@ -84,14 +77,15 @@ class BacktestEngine:
         self._debug_frames: list[DebugFrame] = []
         self._all_orders: list[StrategyOrder] = []
 
-        # Recent trades buffer: product -> list of recent TradePrints
-        self._recent_trades: dict[str, list[TradePrint]] = {}
-        # Own trades (fills) buffer: product -> list of TradePrints
-        # Reset each tick so the strategy only sees new fills.
-        self._own_trades_buffer: dict[str, list[TradePrint]] = {}
+        # Trade buffers for strategy visibility
+        self._own_trades: dict[str, list[TradePrint]] = {}
+        self._market_trades: dict[str, list[TradePrint]] = {}
 
-        # Strategy trader_data persistence across ticks (seeded with UI parameters)
+        # Strategy trader_data persistence across ticks
         self._trader_data: str = json.dumps(config.parameters or {})
+
+        # Track mid prices for mark-to-market
+        self._mid_prices: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Main run loop
@@ -102,20 +96,7 @@ class BacktestEngine:
         events: list[Event],
         strategy_callable: Any,
     ) -> BacktestRun:
-        """Execute the backtest over the provided event stream.
-
-        Parameters
-        ----------
-        events:
-            Chronologically ordered list of Event objects.
-        strategy_callable:
-            An instance of a Trader class with a ``run(state)`` method
-            (as produced by StrategySandbox.load_strategy).
-
-        Returns
-        -------
-        A fully populated BacktestRun with metrics, status, and timing.
-        """
+        """Execute the backtest over the provided event stream."""
         run_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
 
@@ -129,7 +110,6 @@ class BacktestEngine:
         try:
             self._execute_events(events, strategy_callable)
 
-            # Compute final metrics
             perf_metrics = self._compute_performance_metrics()
             exec_metrics = self._compute_execution_metrics()
 
@@ -150,283 +130,307 @@ class BacktestEngine:
         return run
 
     # ------------------------------------------------------------------
-    # Event processing loop
+    # Event processing – grouped by timestamp
     # ------------------------------------------------------------------
 
     def _execute_events(self, events: list[Event], strategy: Any) -> None:
-        """Iterate through events and drive the simulation."""
+        """Group events by timestamp and process each group."""
         sandbox = StrategySandbox(timeout=5.0)
+        products = self._config.products or []
 
+        # Initialize product state
+        for p in products:
+            self._positions.setdefault(p, 0)
+            self._profit_loss.setdefault(p, 0.0)
+            self._own_trades.setdefault(p, [])
+            self._market_trades.setdefault(p, [])
+
+        # Group events by timestamp
+        events_by_ts: dict[int, dict[str, list[Event]]] = {}
         for event in events:
+            ts = event.timestamp
+            if ts not in events_by_ts:
+                events_by_ts[ts] = {"snapshots": [], "trades": []}
             if event.event_type == EventType.BOOK_SNAPSHOT:
-                self._handle_book_snapshot(event, strategy, sandbox)
-
+                events_by_ts[ts]["snapshots"].append(event)
             elif event.event_type == EventType.TRADE_PRINT:
-                self._handle_trade_print(event)
+                events_by_ts[ts]["trades"].append(event)
 
-    def _handle_book_snapshot(
-        self, event: Event, strategy: Any, sandbox: StrategySandbox
+        # Process timestamps in order
+        for ts in sorted(events_by_ts.keys()):
+            group = events_by_ts[ts]
+            self._process_timestamp(
+                ts, group["snapshots"], group["trades"],
+                strategy, sandbox, products,
+            )
+
+    def _process_timestamp(
+        self,
+        timestamp: int,
+        snapshot_events: list[Event],
+        trade_events: list[Event],
+        strategy: Any,
+        sandbox: StrategySandbox,
+        products: list[str],
     ) -> None:
-        """Process a BOOK_SNAPSHOT event: update book, run strategy,
-        process orders, record state."""
-        product = event.product or ""
-        data = event.data
+        """Process all events at a single timestamp.
 
-        # Rebuild the order book from snapshot data
-        snapshot = MarketSnapshot(
-            day=data.get("day", 0),
-            timestamp=event.timestamp,
-            product=product,
-            bid_prices=data.get("bid_prices", []),
-            bid_volumes=data.get("bid_volumes", []),
-            ask_prices=data.get("ask_prices", []),
-            ask_volumes=data.get("ask_volumes", []),
-            mid_price=data.get("mid_price"),
-        )
-        book = self._book_engine.update_from_snapshot(snapshot)
+        This is the core simulation tick, matching Prosperity semantics:
+        1. Update all order books from snapshots.
+        2. Collect market trades (wrapped as MarketTrade for capacity tracking).
+        3. Build TradingState and run strategy once.
+        4. Enforce aggregate position limits.
+        5. Match orders product-by-product against book + market trades.
+        6. Update PnL and record state.
+        """
+        # ── Step 1: Update order books ──
+        for event in snapshot_events:
+            product = event.product or ""
+            data = event.data
+            snapshot = MarketSnapshot(
+                day=data.get("day", 0),
+                timestamp=timestamp,
+                product=product,
+                bid_prices=data.get("bid_prices", []),
+                bid_volumes=data.get("bid_volumes", []),
+                ask_prices=data.get("ask_prices", []),
+                ask_volumes=data.get("ask_volumes", []),
+                mid_price=data.get("mid_price"),
+            )
+            self._book_engine.update_from_snapshot(snapshot)
 
-        # Build Prosperity-compatible state for the strategy
-        products = self._config.products or [product]
+            # Discover products dynamically
+            if product and product not in products:
+                products.append(product)
+                self._positions.setdefault(product, 0)
+                self._profit_loss.setdefault(product, 0.0)
+                self._own_trades.setdefault(product, [])
+                self._market_trades.setdefault(product, [])
+
+        # ── Step 2: Collect market trades for this timestamp ──
+        ts_market_trades: dict[str, list[MarketTrade]] = defaultdict(list)
+        ts_raw_trades: dict[str, list[TradePrint]] = defaultdict(list)
+
+        for event in trade_events:
+            data = event.data
+            product = event.product or data.get("symbol", "")
+            trade = TradePrint(
+                timestamp=timestamp,
+                buyer=data.get("buyer", ""),
+                seller=data.get("seller", ""),
+                symbol=product,
+                price=data.get("price", 0.0),
+                quantity=data.get("quantity", 0),
+                aggressor_side=data.get("aggressor_side"),
+            )
+            ts_raw_trades[product].append(trade)
+            ts_market_trades[product].append(MarketTrade.from_trade_print(trade))
+
+        # Update market trade buffer for strategy visibility
+        for product in products:
+            if product in ts_raw_trades:
+                self._market_trades[product].extend(ts_raw_trades[product])
+                # Keep last 50 per product
+                if len(self._market_trades[product]) > 50:
+                    self._market_trades[product] = self._market_trades[product][-50:]
+
+        # Skip strategy call if no snapshots at this timestamp
+        if not snapshot_events:
+            return
+
+        # ── Step 3: Build Prosperity TradingState ──
         books = {p: self._book_engine.get_current_book(p) for p in products}
 
+        # Update mid prices for mark-to-market
+        for p in products:
+            book = books.get(p)
+            if book is not None and book.mid_price is not None:
+                self._mid_prices[p] = book.mid_price
+
         state = self._adapter.build_state(
-            timestamp=event.timestamp,
+            timestamp=timestamp,
             products=products,
             books=books,
             positions=self._positions,
-            own_trades=self._own_trades_buffer,
-            market_trades=self._recent_trades,
+            own_trades=self._own_trades,
+            market_trades=self._market_trades,
             trader_data=self._trader_data,
         )
 
-        # Execute strategy
+        # ── Step 4: Execute strategy ──
         raw_orders, conversions, trader_data = sandbox.execute_strategy(
-            strategy, state, timeout=1.0
+            strategy, state, timeout=1.0,
         )
-        self._trader_data = trader_data if not trader_data.startswith("ERROR:") else self._trader_data
+        if isinstance(trader_data, str) and not trader_data.startswith("ERROR:"):
+            self._trader_data = trader_data
 
-        # Clear own-trade buffer for next tick (strategy has seen them)
-        self._own_trades_buffer = {p: [] for p in products}
+        # Clear own-trade buffer (strategy has seen them)
+        for p in products:
+            self._own_trades[p] = []
 
-        # Cancel all previous resting orders before placing new ones.
-        # In IMC Prosperity, each strategy call's output replaces all
-        # previous orders — there is no persistent resting book between ticks.
-        self._execution_engine.cancel_all_resting(products)
+        # ── Step 5: Enforce aggregate position limits ──
+        if not isinstance(raw_orders, dict):
+            raw_orders = {}
 
-        # Convert strategy output to internal orders
-        strategy_orders = self._process_strategy_output(raw_orders, event.timestamp)
-        self._all_orders.extend(strategy_orders)
+        checked_orders = self._execution_engine.enforce_limits(raw_orders)
 
-        # Process each order through the execution engine
+        # ── Step 6: Match orders product-by-product ──
         tick_fills: list[FillEvent] = []
-        for order in strategy_orders:
-            fills = self._execution_engine.process_order(order, book)
-            tick_fills.extend(fills)
+        tick_orders: list[StrategyOrder] = []
 
-        self._process_fills(tick_fills, book)
+        for product, orders in checked_orders.items():
+            if not orders:
+                continue
 
-        # Clear recent trades after processing (strategy + execution have seen them)
-        self._recent_trades[product] = []
+            # Convert to StrategyOrder for tracking
+            for order in orders:
+                qty = getattr(order, "quantity", 0)
+                if qty == 0:
+                    continue
+                tick_orders.append(StrategyOrder(
+                    order_id=str(uuid.uuid4()),
+                    product=product,
+                    side=OrderSide.BUY if qty > 0 else OrderSide.SELL,
+                    price=float(getattr(order, "price", 0)),
+                    quantity=abs(qty),
+                    timestamp=timestamp,
+                    created_at=timestamp,
+                ))
 
-        # Record PnL snapshot
-        pnl_state = self._build_pnl_state(event.timestamp, books)
+            # Build mutable copies of order depth for this product
+            book = books.get(product)
+            if book is None:
+                continue
+
+            buy_depth: dict[int, int] = {}
+            sell_depth: dict[int, int] = {}
+            for level in book.bids:
+                buy_depth[int(level.price)] = level.volume
+            for level in book.asks:
+                sell_depth[int(level.price)] = -level.volume  # Prosperity: negative
+
+            product_fills = self._execution_engine.match_orders(
+                product=product,
+                orders=orders,
+                buy_orders=buy_depth,
+                sell_orders=sell_depth,
+                market_trades=ts_market_trades.get(product, []),
+                timestamp=timestamp,
+            )
+            tick_fills.extend(product_fills)
+
+        self._all_orders.extend(tick_orders)
+
+        # ── Step 7: Process fills – update PnL and positions ──
+        self._process_fills(tick_fills, timestamp)
+
+        # ── Step 8: Record PnL snapshot (mark-to-market) ──
+        pnl_state = self._build_pnl_state(timestamp)
         self._pnl_history.append(pnl_state)
 
-        # Build debug frame
+        # ── Step 9: Build debug frame ──
+        primary_book = None
+        primary_product = ""
+        if snapshot_events:
+            primary_product = snapshot_events[0].product or ""
+            primary_book = books.get(primary_product)
+        if primary_book is None:
+            primary_book = VisibleOrderBook(product="", timestamp=timestamp)
+
         debug_frame = self._build_debug_frame(
-            event, book, strategy_orders, tick_fills, raw_orders
+            timestamp, primary_product, primary_book,
+            tick_orders, tick_fills, raw_orders,
         )
         self._debug_frames.append(debug_frame)
 
-    def _handle_trade_print(self, event: Event) -> None:
-        """Process a TRADE_PRINT event: buffer the trade and check
-        passive fills."""
-        data = event.data
-        product = event.product or data.get("symbol", "")
-
-        trade = TradePrint(
-            timestamp=event.timestamp,
-            buyer=data.get("buyer", ""),
-            seller=data.get("seller", ""),
-            symbol=product,
-            price=data.get("price", 0.0),
-            quantity=data.get("quantity", 0),
-            aggressor_side=data.get("aggressor_side"),
-        )
-
-        self._recent_trades.setdefault(product, []).append(trade)
-
-        # Check passive fills using the latest known book for this product
-        book = self._book_engine.get_current_book(product)
-        if book is not None:
-            passive_fills = self._execution_engine.check_passive_fills(
-                book, [trade]
-            )
-            self._process_fills(passive_fills, book)
-
     # ------------------------------------------------------------------
-    # Fill processing and position tracking
+    # Fill processing – cash-flow PnL
     # ------------------------------------------------------------------
 
-    def _process_fills(
-        self, fills: list[FillEvent], book: VisibleOrderBook
-    ) -> None:
-        """Apply fills to positions, cash, and PnL tracking."""
+    def _process_fills(self, fills: list[FillEvent], timestamp: int) -> None:
+        """Apply fills using simple cash-flow PnL (Prosperity style).
+
+        Buy:  profit_loss[product] -= price * volume
+              position[product] += volume
+        Sell: profit_loss[product] += price * volume
+              position[product] -= volume
+        """
         for fill in fills:
             self._fills.append(fill)
             product = fill.product
 
-            old_pos = self._positions.get(product, 0)
-            old_avg = self._avg_entry_prices.get(product, 0.0)
-
             if fill.side == OrderSide.BUY:
-                new_pos = old_pos + fill.quantity
-                signed_qty = fill.quantity
+                self._profit_loss[product] = (
+                    self._profit_loss.get(product, 0.0) - fill.price * fill.quantity
+                )
+                self._positions[product] = self._positions.get(product, 0) + fill.quantity
             else:
-                new_pos = old_pos - fill.quantity
-                signed_qty = -fill.quantity
+                self._profit_loss[product] = (
+                    self._profit_loss.get(product, 0.0) + fill.price * fill.quantity
+                )
+                self._positions[product] = self._positions.get(product, 0) - fill.quantity
 
-            # Update cash: buying costs money, selling earns money
-            self._cash -= signed_qty * fill.price
-
-            # Calculate realized PnL when reducing or flipping position
-            realized = 0.0
-            if old_pos != 0 and _sign(old_pos) != _sign(new_pos) or (
-                old_pos != 0 and abs(new_pos) < abs(old_pos)
-            ):
-                # Closing (partially or fully) an existing position
-                closing_qty = min(abs(signed_qty), abs(old_pos))
-                if fill.side == OrderSide.SELL and old_pos > 0:
-                    # Closing a long: profit = (sell_price - avg_entry) * qty
-                    realized = (fill.price - old_avg) * closing_qty
-                elif fill.side == OrderSide.BUY and old_pos < 0:
-                    # Closing a short: profit = (avg_entry - buy_price) * qty
-                    realized = (old_avg - fill.price) * closing_qty
-
-                self._realized_pnl[product] = self._realized_pnl.get(product, 0.0) + realized
-
-            # Update average entry price
-            if new_pos == 0:
-                self._avg_entry_prices[product] = 0.0
-            elif _sign(new_pos) == _sign(old_pos) and abs(new_pos) > abs(old_pos):
-                # Adding to position: update weighted average
-                total = abs(old_pos) + abs(signed_qty)
-                self._avg_entry_prices[product] = (
-                    old_avg * abs(old_pos) + fill.price * abs(signed_qty)
-                ) / total
-            elif _sign(new_pos) != _sign(old_pos):
-                # Flipped direction: new entry price is the fill price
-                self._avg_entry_prices[product] = fill.price
-            # else: reducing position, avg entry stays the same
-
-            self._positions[product] = new_pos
-
-            # Sync position with execution engine for limit checks
-            self._execution_engine.update_position(product, new_pos)
+            # Sync position with execution engine
+            self._execution_engine.update_position(product, self._positions[product])
 
             # Buffer as own trade for strategy visibility on next tick
             own_trade = TradePrint(
-                timestamp=fill.timestamp,
-                buyer="STRATEGY" if fill.side == OrderSide.BUY else "MARKET",
-                seller="MARKET" if fill.side == OrderSide.BUY else "STRATEGY",
+                timestamp=fill.timestamp or timestamp,
+                buyer="SUBMISSION" if fill.side == OrderSide.BUY else "",
+                seller="" if fill.side == OrderSide.BUY else "SUBMISSION",
                 symbol=product,
                 price=fill.price,
                 quantity=fill.quantity,
             )
-            self._own_trades_buffer.setdefault(product, []).append(own_trade)
+            self._own_trades.setdefault(product, []).append(own_trade)
 
     # ------------------------------------------------------------------
-    # Strategy output conversion
+    # PnL snapshot – mark-to-market
     # ------------------------------------------------------------------
 
-    def _process_strategy_output(
-        self, raw_orders: Any, timestamp: int
-    ) -> list[StrategyOrder]:
-        """Convert raw strategy output (Prosperity order dict) to
-        internal StrategyOrder list."""
-        if not isinstance(raw_orders, dict):
-            return []
+    def _build_pnl_state(self, timestamp: int) -> PnLState:
+        """Build a point-in-time PnL snapshot.
 
-        return self._adapter.parse_orders(raw_orders, timestamp=timestamp)
-
-    # ------------------------------------------------------------------
-    # State builders
-    # ------------------------------------------------------------------
-
-    def _build_strategy_state(
-        self,
-        event: Event,
-        book: VisibleOrderBook,
-        positions: dict[str, int],
-        trader_data: str,
-    ) -> dict:
-        """Build a raw state dict (non-Prosperity format) for reference.
-
-        This is the internal representation; the actual strategy receives
-        a TradingState object built by ProsperityAdapter.
+        total_pnl = sum over products of (profit_loss[p] + position[p] * mid_price[p])
         """
-        return {
-            "timestamp": event.timestamp,
-            "product": event.product,
-            "book": {
-                "bids": [(l.price, l.volume) for l in book.bids],
-                "asks": [(l.price, l.volume) for l in book.asks],
-                "mid_price": book.mid_price,
-                "spread": book.spread,
-            },
-            "positions": dict(positions),
-            "trader_data": trader_data,
-        }
+        total_pnl = 0.0
+        total_cash = sum(self._profit_loss.values())
 
-    def _build_pnl_state(
-        self, timestamp: int, books: dict[str, VisibleOrderBook]
-    ) -> PnLState:
-        """Capture a point-in-time PnL snapshot."""
-        total_realized = sum(self._realized_pnl.values())
-        total_unrealized = 0.0
-
-        for product, qty in self._positions.items():
-            if qty == 0:
-                continue
-            mark = _get_mark_price(books.get(product))
-            if mark is not None:
-                avg = self._avg_entry_prices.get(product, 0.0)
-                if qty > 0:
-                    total_unrealized += (mark - avg) * qty
-                else:
-                    total_unrealized += (avg - mark) * abs(qty)
+        for product in self._positions:
+            cash_pnl = self._profit_loss.get(product, 0.0)
+            pos = self._positions.get(product, 0)
+            mid = self._mid_prices.get(product, 0.0)
+            product_pnl = cash_pnl + pos * mid
+            total_pnl += product_pnl
 
         return PnLState(
             timestamp=timestamp,
-            realized_pnl=total_realized,
-            unrealized_pnl=total_unrealized,
-            total_pnl=total_realized + total_unrealized,
+            realized_pnl=total_cash,  # Cash PnL (all realized trades)
+            unrealized_pnl=total_pnl - total_cash,  # Position mark-to-market
+            total_pnl=total_pnl,
             inventory={p: q for p, q in self._positions.items()},
-            cash=self._cash,
+            cash=total_cash,
         )
+
+    # ------------------------------------------------------------------
+    # Debug frame
+    # ------------------------------------------------------------------
 
     def _build_debug_frame(
         self,
-        event: Event,
+        timestamp: int,
+        product: str,
         book: VisibleOrderBook,
         orders: list[StrategyOrder],
         fills: list[FillEvent],
         raw_orders: Any,
     ) -> DebugFrame:
-        """Build a debug frame capturing full state at this timestamp."""
-        warnings: list[str] = []
-
-        # Warn about rejected orders
-        for order in orders:
-            if order.status.value == "REJECTED":
-                warnings.append(
-                    f"Order {order.order_id[:8]} REJECTED: "
-                    f"{order.side.value} {order.quantity} {order.product} @ {order.price}"
-                )
+        """Build a debug frame capturing state at this timestamp."""
+        last_pnl = self._pnl_history[-1] if self._pnl_history else None
 
         return DebugFrame(
-            timestamp=event.timestamp,
-            product=event.product or "",
+            timestamp=timestamp,
+            product=product,
             market_state={
                 "mid_price": book.mid_price,
                 "spread": book.spread,
@@ -447,12 +451,12 @@ class BacktestEngine:
             fills=[f.model_dump() for f in fills],
             position={p: q for p, q in self._positions.items()},
             pnl={
-                "realized": sum(self._realized_pnl.values()),
-                "unrealized": self._pnl_history[-1].unrealized_pnl if self._pnl_history else 0.0,
-                "total": self._pnl_history[-1].total_pnl if self._pnl_history else 0.0,
-                "cash": self._cash,
+                "realized": last_pnl.realized_pnl if last_pnl else 0.0,
+                "unrealized": last_pnl.unrealized_pnl if last_pnl else 0.0,
+                "total": last_pnl.total_pnl if last_pnl else 0.0,
+                "cash": last_pnl.cash if last_pnl else 0.0,
             },
-            warnings=warnings,
+            warnings=[],
         )
 
     # ------------------------------------------------------------------
@@ -461,19 +465,20 @@ class BacktestEngine:
 
     def _compute_performance_metrics(self) -> PerformanceMetrics:
         """Compute aggregate performance metrics from the completed run."""
-        total_realized = sum(self._realized_pnl.values())
-
-        # Unrealized from last PnL snapshot
-        total_unrealized = self._pnl_history[-1].unrealized_pnl if self._pnl_history else 0.0
-        total_pnl = total_realized + total_unrealized
+        last_pnl = self._pnl_history[-1] if self._pnl_history else None
+        total_pnl = last_pnl.total_pnl if last_pnl else 0.0
+        total_realized = last_pnl.realized_pnl if last_pnl else 0.0
+        total_unrealized = last_pnl.unrealized_pnl if last_pnl else 0.0
 
         # Per-product PnL
         pnl_by_product: dict[str, float] = {}
-        for product in self._realized_pnl:
-            pnl_by_product[product] = self._realized_pnl[product]
+        for product in self._positions:
+            cash = self._profit_loss.get(product, 0.0)
+            pos = self._positions.get(product, 0)
+            mid = self._mid_prices.get(product, 0.0)
+            pnl_by_product[product] = cash + pos * mid
 
-        # Trade-level analysis
-        # Group fills into round-trip trades for win/loss analysis
+        # Trade-level analysis (group fills into round trips)
         trade_pnls = self._compute_trade_pnls()
         wins = [p for p in trade_pnls if p > 0]
         losses = [p for p in trade_pnls if p < 0]
@@ -482,34 +487,29 @@ class BacktestEngine:
         avg_win = sum(wins) / len(wins) if wins else 0.0
         avg_loss = sum(losses) / len(losses) if losses else 0.0
         win_rate = len(wins) / num_trades if num_trades > 0 else 0.0
-
-        # Turnover: total volume * price
         turnover = sum(f.price * f.quantity for f in self._fills)
-
-        # Return per trade
         return_per_trade = total_pnl / num_trades if num_trades > 0 else 0.0
 
-        # Max drawdown from PnL curve
         max_dd, dd_duration = self._compute_max_drawdown()
-
-        # Sharpe ratio (from PnL time series, assuming per-tick returns)
         sharpe, vol = self._compute_sharpe()
 
         # Inventory stats
-        inventory_values = []
-        for snap in self._pnl_history:
-            inv = sum(abs(v) for v in snap.inventory.values())
-            inventory_values.append(inv)
-
+        inventory_values = [
+            sum(abs(v) for v in snap.inventory.values())
+            for snap in self._pnl_history
+        ]
         avg_inventory = sum(inventory_values) / len(inventory_values) if inventory_values else 0.0
         max_inventory = max(inventory_values) if inventory_values else 0.0
 
         # Profit factor
         gross_profit = sum(wins) if wins else 0.0
         gross_loss = abs(sum(losses)) if losses else 0.0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999.0 if gross_profit > 0 else 0.0
+        profit_factor = (
+            gross_profit / gross_loss if gross_loss > 0
+            else 999.0 if gross_profit > 0
+            else 0.0
+        )
 
-        # Consecutive wins/losses
         max_consec_wins, max_consec_losses = self._compute_consecutive(trade_pnls)
 
         return PerformanceMetrics(
@@ -539,44 +539,30 @@ class BacktestEngine:
         num_orders = len(self._all_orders)
         fill_count = len(self._fills)
 
-        full_fills = sum(
-            1 for o in self._all_orders if o.status.value == "FILLED"
-        )
-        partial_fills = sum(
-            1 for o in self._all_orders if o.status.value == "PARTIAL_FILL"
-        )
-        cancels = sum(
-            1 for o in self._all_orders if o.status.value == "CANCELLED"
-        )
-        rejects = sum(
-            1 for o in self._all_orders if o.status.value == "REJECTED"
-        )
-
-        full_fill_rate = full_fills / num_orders if num_orders > 0 else 0.0
-        partial_fill_rate = partial_fills / num_orders if num_orders > 0 else 0.0
-
-        # Passive vs aggressive fills
-        passive_fills = [f for f in self._fills if not f.is_aggressive]
         aggressive_fills = [f for f in self._fills if f.is_aggressive]
-        passive_vol = sum(f.quantity for f in passive_fills)
+        passive_fills = [f for f in self._fills if not f.is_aggressive]
         aggressive_vol = sum(f.quantity for f in aggressive_fills)
-        total_vol = passive_vol + aggressive_vol
+        passive_vol = sum(f.quantity for f in passive_fills)
+        total_vol = aggressive_vol + passive_vol
 
-        pa_ratio = passive_vol / aggressive_vol if aggressive_vol > 0 else float("inf") if passive_vol > 0 else 0.0
-
+        pa_ratio = (
+            passive_vol / aggressive_vol if aggressive_vol > 0
+            else float("inf") if passive_vol > 0
+            else 0.0
+        )
         avg_fill_size = total_vol / fill_count if fill_count > 0 else 0.0
 
         return ExecutionMetrics(
             num_orders=num_orders,
             fill_count=fill_count,
-            full_fill_rate=full_fill_rate,
-            partial_fill_rate=partial_fill_rate,
-            cancel_count=cancels,
-            reject_count=rejects,
-            avg_fill_delay=0.0,  # Would need order-to-fill timestamp tracking
-            effective_spread_captured=0.0,  # Requires mid-price at fill time
+            full_fill_rate=0.0,
+            partial_fill_rate=0.0,
+            cancel_count=0,
+            reject_count=0,
+            avg_fill_delay=0.0,
+            effective_spread_captured=0.0,
             passive_aggressive_ratio=pa_ratio,
-            estimated_slippage=self._config.slippage,
+            estimated_slippage=0.0,
             avg_fill_size=avg_fill_size,
             total_volume_traded=total_vol,
             maker_volume=passive_vol,
@@ -584,12 +570,7 @@ class BacktestEngine:
         )
 
     def _compute_trade_pnls(self) -> list[float]:
-        """Approximate per-trade PnL from fills.
-
-        Groups fills into offsetting pairs (FIFO basis) and computes
-        PnL for each completed round trip.
-        """
-        # Track open fill entries per product as FIFO queues
+        """Approximate per-trade PnL using FIFO round-trip pairing."""
         open_entries: dict[str, list[tuple[float, int, OrderSide]]] = {}
         trade_pnls: list[float] = []
 
@@ -598,10 +579,8 @@ class BacktestEngine:
             entries = open_entries.setdefault(product, [])
 
             if not entries or entries[0][2] == fill.side:
-                # Same direction: adding to position
                 entries.append((fill.price, fill.quantity, fill.side))
             else:
-                # Opposite direction: closing position (FIFO)
                 remaining_close = fill.quantity
                 while remaining_close > 0 and entries and entries[0][2] != fill.side:
                     entry_price, entry_qty, entry_side = entries[0]
@@ -618,23 +597,20 @@ class BacktestEngine:
                         entries.pop(0)
                     else:
                         entries[0] = (entry_price, entry_qty - close_qty, entry_side)
-
                     remaining_close -= close_qty
 
-                # Any leftover opens a new position in the fill direction
                 if remaining_close > 0:
                     entries.append((fill.price, remaining_close, fill.side))
 
         return trade_pnls
 
     def _compute_max_drawdown(self) -> tuple[float, int]:
-        """Compute maximum drawdown and its duration from PnL history."""
+        """Compute max drawdown and its duration from PnL history."""
         if not self._pnl_history:
             return 0.0, 0
 
         peak = self._pnl_history[0].total_pnl
         max_dd = 0.0
-        dd_start = 0
         max_dd_duration = 0
         current_dd_start = 0
 
@@ -651,18 +627,14 @@ class BacktestEngine:
         return max_dd, max_dd_duration
 
     def _compute_sharpe(self) -> tuple[float, float]:
-        """Compute annualized Sharpe ratio and PnL volatility.
-
-        Uses tick-by-tick PnL changes. Assumes ~1000 ticks per day
-        and 252 trading days for annualization (adjustable).
-        """
+        """Compute annualized Sharpe ratio and PnL volatility."""
         if len(self._pnl_history) < 2:
             return 0.0, 0.0
 
-        returns = []
-        for i in range(1, len(self._pnl_history)):
-            ret = self._pnl_history[i].total_pnl - self._pnl_history[i - 1].total_pnl
-            returns.append(ret)
+        returns = [
+            self._pnl_history[i].total_pnl - self._pnl_history[i - 1].total_pnl
+            for i in range(1, len(self._pnl_history))
+        ]
 
         if not returns:
             return 0.0, 0.0
@@ -674,20 +646,13 @@ class BacktestEngine:
         if std_ret == 0:
             return 0.0, 0.0
 
-        # Raw Sharpe per tick, then annualize (assuming ~1000 ticks/day, 252 days)
         ticks_per_year = 1000 * 252
         sharpe = (mean_ret / std_ret) * math.sqrt(ticks_per_year)
-
         return sharpe, std_ret
 
     @staticmethod
     def _compute_consecutive(trade_pnls: list[float]) -> tuple[int, int]:
-        """Compute max consecutive wins and max consecutive losses."""
-        max_wins = 0
-        max_losses = 0
-        current_wins = 0
-        current_losses = 0
-
+        max_wins = max_losses = current_wins = current_losses = 0
         for pnl in trade_pnls:
             if pnl > 0:
                 current_wins += 1
@@ -698,25 +663,20 @@ class BacktestEngine:
                 current_wins = 0
                 max_losses = max(max_losses, current_losses)
             else:
-                current_wins = 0
-                current_losses = 0
-
+                current_wins = current_losses = 0
         return max_wins, max_losses
 
     # ------------------------------------------------------------------
-    # Public accessors for results
+    # Public accessors
     # ------------------------------------------------------------------
 
     def get_debug_frames(self) -> list[DebugFrame]:
-        """Return all debug frames collected during the run."""
         return list(self._debug_frames)
 
     def get_pnl_history(self) -> list[PnLState]:
-        """Return the full PnL time series."""
         return list(self._pnl_history)
 
     def get_fills(self) -> list[FillEvent]:
-        """Return all fills generated during the run."""
         return list(self._fills)
 
 
@@ -724,9 +684,8 @@ class BacktestEngine:
 # Module-level helpers
 # =====================================================================
 
-
 def _sanitize_floats(obj):
-    """Replace NaN/Inf floats with None for JSON serialization."""
+    """Replace NaN/Inf floats with 0.0 for JSON serialization."""
     if isinstance(obj, float):
         if math.isnan(obj) or math.isinf(obj):
             return 0.0
@@ -736,25 +695,3 @@ def _sanitize_floats(obj):
     if isinstance(obj, list):
         return [_sanitize_floats(v) for v in obj]
     return obj
-
-
-def _sign(x: int) -> int:
-    """Return the sign of an integer: -1, 0, or 1."""
-    if x > 0:
-        return 1
-    elif x < 0:
-        return -1
-    return 0
-
-
-def _get_mark_price(book: Optional[VisibleOrderBook]) -> Optional[float]:
-    """Extract a mark price from a book, preferring mid then best bid/ask."""
-    if book is None:
-        return None
-    if book.mid_price is not None:
-        return book.mid_price
-    if book.best_bid is not None:
-        return book.best_bid
-    if book.best_ask is not None:
-        return book.best_ask
-    return None

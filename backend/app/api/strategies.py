@@ -30,12 +30,14 @@ class UploadRequest(BaseModel):
 class RunStrategyRequest(BaseModel):
     products: list[str] = []
     days: list[int] = []
-    execution_model: str = "BALANCED"
+    trade_matching: str = "ALL"
     position_limits: dict[str, int] = {}
-    fees: float = 0.0
-    slippage: float = 0.0
     initial_cash: float = 0.0
     parameters: dict[str, Any] = Field(default_factory=dict)
+    # Legacy fields (accepted for backward compat)
+    execution_model: str = "BALANCED"
+    fees: float = 0.0
+    slippage: float = 0.0
 
 
 class CompareRequest(BaseModel):

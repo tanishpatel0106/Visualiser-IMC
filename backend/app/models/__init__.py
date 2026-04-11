@@ -9,6 +9,7 @@ from app.models.backtest import (
     BacktestConfig,
     BacktestRun,
     ExecutionModel,
+    TradeMatchingMode,
     ReplaySession,
     RunArtifact,
 )
@@ -57,6 +58,7 @@ __all__ = [
     "PnLState",
     # Backtest
     "ExecutionModel",
+    "TradeMatchingMode",
     "BacktestConfig",
     "BacktestRun",
     "ReplaySession",

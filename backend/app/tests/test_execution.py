@@ -1,473 +1,383 @@
-"""Tests for the ExecutionEngine."""
+"""Tests for the ExecutionEngine (Prosperity-accurate matching)."""
 
 import pytest
 
-from app.engines.execution.engine import ExecutionEngine
-from app.models.backtest import ExecutionModel
-from app.models.market import (
-    BookLevel,
-    OrderSide,
-    OrderStatus,
-    OrderType,
-    TradePrint,
-    VisibleOrderBook,
-)
-from app.models.trading import StrategyOrder
+from app.engines.execution.engine import ExecutionEngine, MarketTrade
+from app.models.backtest import TradeMatchingMode
+from app.models.market import OrderSide, TradePrint
 
 
 # ======================================================================
-# Fixtures / helpers
+# Helpers
 # ======================================================================
 
-def _make_book(bids, asks, product="X", timestamp=100):
-    return VisibleOrderBook(
-        product=product,
-        timestamp=timestamp,
-        bids=[BookLevel(price=p, volume=v, side=OrderSide.BUY) for p, v in bids],
-        asks=[BookLevel(price=p, volume=v, side=OrderSide.SELL) for p, v in asks],
-    )
+class _Order:
+    """Minimal Prosperity-style Order for testing."""
+    def __init__(self, symbol: str, price: int, quantity: int):
+        self.symbol = symbol
+        self.price = price
+        self.quantity = quantity
 
 
-def _make_order(
-    order_id="o1",
-    product="X",
-    side=OrderSide.BUY,
-    price=0.0,
-    quantity=10,
-    order_type=OrderType.LIMIT,
-    timestamp=100,
-):
-    return StrategyOrder(
-        order_id=order_id,
-        product=product,
-        side=side,
-        order_type=order_type,
-        price=price,
-        quantity=quantity,
-        timestamp=timestamp,
-    )
-
-
-@pytest.fixture
-def balanced_engine():
+def _make_engine(mode=TradeMatchingMode.ALL, limits=None):
     return ExecutionEngine(
-        execution_model=ExecutionModel.BALANCED,
-        position_limits={"X": 20},
-        fees=0.0,
-        slippage=0.0,
+        trade_matching_mode=mode,
+        position_limits=limits or {"X": 20},
+        default_limit=50,
     )
 
 
-@pytest.fixture
-def conservative_engine():
-    return ExecutionEngine(
-        execution_model=ExecutionModel.CONSERVATIVE,
-        position_limits={"X": 20},
-        fees=0.0,
-        slippage=0.0,
+def _make_market_trade(symbol="X", price=100.0, quantity=5):
+    tp = TradePrint(
+        timestamp=100, buyer="A", seller="B",
+        symbol=symbol, price=price, quantity=quantity,
     )
-
-
-@pytest.fixture
-def optimistic_engine():
-    return ExecutionEngine(
-        execution_model=ExecutionModel.OPTIMISTIC,
-        position_limits={"X": 20},
-        fees=0.0,
-        slippage=0.0,
-    )
+    return MarketTrade.from_trade_print(tp)
 
 
 # ======================================================================
-# Aggressive buy fills against the ask side
+# Buy order matching against ask side of book
 # ======================================================================
 
-class TestAggressiveBuyFill:
-    def test_full_fill_against_single_ask(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 20)],
+class TestBuyOrderBookMatching:
+    def test_full_fill_at_ask_price(self):
+        engine = _make_engine()
+        # Buy at 101, ask at 101 with volume 20
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 5)],
+            buy_orders={99: 10},
+            sell_orders={101: -20},
+            market_trades=[],
         )
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = balanced_engine.process_order(order, book)
-
         assert len(fills) == 1
-        assert fills[0].price == pytest.approx(101.0)
+        assert fills[0].price == 101.0
         assert fills[0].quantity == 5
         assert fills[0].is_aggressive is True
-        assert order.status == OrderStatus.FILLED
+        assert fills[0].side == OrderSide.BUY
 
-    def test_fill_walks_multiple_ask_levels(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 5), (102.0, 10)],
+    def test_walks_multiple_ask_levels(self):
+        engine = _make_engine()
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 103, 8)],
+            buy_orders={99: 10},
+            sell_orders={101: -5, 102: -10},
+            market_trades=[],
         )
-        order = _make_order(side=OrderSide.BUY, price=102.0, quantity=8)
-        fills = balanced_engine.process_order(order, book)
-
         assert len(fills) == 2
-        assert fills[0].price == pytest.approx(101.0)
+        assert fills[0].price == 101.0
         assert fills[0].quantity == 5
-        assert fills[1].price == pytest.approx(102.0)
+        assert fills[1].price == 102.0
         assert fills[1].quantity == 3
-        assert order.status == OrderStatus.FILLED
 
-
-# ======================================================================
-# Aggressive sell fills against the bid side
-# ======================================================================
-
-class TestAggressiveSellFill:
-    def test_full_fill_against_single_bid(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 20)],
-            asks=[(101.0, 10)],
+    def test_price_improvement(self):
+        """Buy at 105 but best ask is 101 -> fills at 101."""
+        engine = _make_engine()
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 105, 3)],
+            buy_orders={99: 10},
+            sell_orders={101: -10},
+            market_trades=[],
         )
-        order = _make_order(side=OrderSide.SELL, price=99.0, quantity=5)
-        fills = balanced_engine.process_order(order, book)
+        assert fills[0].price == 101.0
 
+    def test_no_fill_if_price_below_asks(self):
+        engine = _make_engine()
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 99, 5)],
+            buy_orders={98: 10},
+            sell_orders={101: -20},
+            market_trades=[],
+        )
+        assert fills == []
+
+    def test_consumes_book_volume(self):
+        engine = _make_engine()
+        sell_orders = {101: -10}
+        engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 7)],
+            buy_orders={99: 10},
+            sell_orders=sell_orders,
+            market_trades=[],
+        )
+        # 10 - 7 = 3 remaining
+        assert sell_orders[101] == -3
+
+    def test_removes_level_when_fully_consumed(self):
+        engine = _make_engine()
+        sell_orders = {101: -5}
+        engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 5)],
+            buy_orders={99: 10},
+            sell_orders=sell_orders,
+            market_trades=[],
+        )
+        assert 101 not in sell_orders
+
+
+# ======================================================================
+# Sell order matching against bid side of book
+# ======================================================================
+
+class TestSellOrderBookMatching:
+    def test_full_fill_at_bid_price(self):
+        engine = _make_engine()
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 99, -5)],
+            buy_orders={99: 20},
+            sell_orders={101: -10},
+            market_trades=[],
+        )
         assert len(fills) == 1
-        assert fills[0].price == pytest.approx(99.0)
+        assert fills[0].price == 99.0
         assert fills[0].quantity == 5
-        assert fills[0].is_aggressive is True
+        assert fills[0].side == OrderSide.SELL
 
-    def test_fill_walks_multiple_bid_levels(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 3), (98.0, 10)],
-            asks=[(101.0, 10)],
+    def test_walks_multiple_bid_levels(self):
+        engine = _make_engine()
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 97, -8)],
+            buy_orders={99: 3, 98: 10},
+            sell_orders={101: -10},
+            market_trades=[],
         )
-        order = _make_order(side=OrderSide.SELL, price=98.0, quantity=7)
-        fills = balanced_engine.process_order(order, book)
-
         assert len(fills) == 2
-        assert fills[0].quantity == 3  # consume 99.0 level
-        assert fills[1].quantity == 4  # 4 from 98.0 level
-
-
-# ======================================================================
-# Partial fill when order exceeds book depth
-# ======================================================================
-
-class TestPartialFill:
-    def test_partial_fill_excess_quantity(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 5)],
-            asks=[(101.0, 3)],
-        )
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=10)
-        fills = balanced_engine.process_order(order, book)
-
-        assert len(fills) == 1
+        assert fills[0].price == 99.0
         assert fills[0].quantity == 3
-        assert order.filled_quantity == 3
-        assert order.remaining_quantity == 7
-        # Remaining should rest passively
-        assert order.status == OrderStatus.PARTIAL_FILL
+        assert fills[1].price == 98.0
+        assert fills[1].quantity == 5
+
+    def test_price_improvement_for_seller(self):
+        """Sell at 95 but best bid is 99 -> fills at 99."""
+        engine = _make_engine()
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 95, -3)],
+            buy_orders={99: 10},
+            sell_orders={101: -10},
+            market_trades=[],
+        )
+        assert fills[0].price == 99.0
 
 
 # ======================================================================
-# Position limit rejection
+# Market trade matching (Phase 2)
 # ======================================================================
 
-class TestPositionLimitRejection:
-    def test_buy_exceeds_limit_rejected(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 50)],
+class TestMarketTradeMatching:
+    def test_buy_matches_market_trade(self):
+        """After book exhausted, match remaining against market trade."""
+        engine = _make_engine(mode=TradeMatchingMode.ALL)
+        mt = _make_market_trade(price=100, quantity=10)
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, 5)],
+            buy_orders={98: 10},
+            sell_orders={},  # empty book
+            market_trades=[mt],
         )
-        # Limit for X is 20; buying 25 from position 0 would give pos=25 > 20
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=25)
-        fills = balanced_engine.process_order(order, book)
-
-        assert fills == []
-        assert order.status == OrderStatus.REJECTED
-
-    def test_sell_exceeds_limit_rejected(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 50)],
-            asks=[(101.0, 10)],
-        )
-        order = _make_order(side=OrderSide.SELL, price=99.0, quantity=25)
-        fills = balanced_engine.process_order(order, book)
-
-        assert fills == []
-        assert order.status == OrderStatus.REJECTED
-
-    def test_within_limit_accepted(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 50)],
-        )
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=15)
-        fills = balanced_engine.process_order(order, book)
-
-        assert len(fills) > 0
-
-    def test_no_limit_allows_any_size(self):
-        engine = ExecutionEngine(
-            execution_model=ExecutionModel.BALANCED,
-            position_limits={},  # no limits
-            fees=0.0,
-            slippage=0.0,
-        )
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 1000)],
-        )
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=500)
-        fills = engine.process_order(order, book)
-        assert sum(f.quantity for f in fills) == 500
-
-
-# ======================================================================
-# Passive fill in CONSERVATIVE mode
-# ======================================================================
-
-class TestPassiveFillConservative:
-    def test_passive_fill_with_matching_trade(self, conservative_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 15)],
-        )
-        # Place a passive buy at 98.0 (below best ask, so rests)
-        order = _make_order(side=OrderSide.BUY, price=98.0, quantity=5)
-        fills = conservative_engine.process_order(order, book)
-        assert fills == []  # rests passively
-        assert order.status == OrderStatus.ACTIVE
-
-        # Now a trade comes in at 98.0 -- conservative requires actual trade at/through price
-        trade = TradePrint(
-            timestamp=200, buyer="A", seller="B", symbol="X",
-            price=98.0, quantity=3,
-        )
-        passive_fills = conservative_engine.check_passive_fills(book, [trade])
-        assert len(passive_fills) == 1
-        assert passive_fills[0].quantity == 3
-        assert passive_fills[0].is_aggressive is False
-
-    def test_no_passive_fill_without_trade(self, conservative_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 15)],
-        )
-        order = _make_order(side=OrderSide.BUY, price=98.0, quantity=5)
-        conservative_engine.process_order(order, book)
-
-        # No trades -- no fills in conservative mode
-        passive_fills = conservative_engine.check_passive_fills(book, [])
-        assert passive_fills == []
-
-
-# ======================================================================
-# Passive allocation realism checks
-# ======================================================================
-
-class TestPassiveAllocation:
-    def test_global_trade_quantity_consumption(self, conservative_engine):
-        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
-        o1 = _make_order(order_id="o1", side=OrderSide.BUY, price=97.0, quantity=5, timestamp=100)
-        o2 = _make_order(order_id="o2", side=OrderSide.BUY, price=97.0, quantity=5, timestamp=101)
-        conservative_engine.process_order(o1, book)
-        conservative_engine.process_order(o2, book)
-
-        trade = TradePrint(
-            timestamp=200, buyer="A", seller="B", symbol="X",
-            price=97.0, quantity=6, aggressor_side=OrderSide.SELL,
-        )
-        fills = conservative_engine.check_passive_fills(book, [trade])
-
-        assert sum(f.quantity for f in fills) == 6
-        assert len(fills) == 2
-        assert fills[0].order_id == "o1"
+        assert len(fills) == 1
+        # Fills at ORDER's price, not market trade's price
+        assert fills[0].price == 100.0
         assert fills[0].quantity == 5
-        assert fills[1].order_id == "o2"
-        assert fills[1].quantity == 1
+        assert fills[0].is_aggressive is False
 
-    def test_price_time_priority(self, conservative_engine):
-        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
-        best_price = _make_order(order_id="best", side=OrderSide.BUY, price=99.0, quantity=4, timestamp=101)
-        older = _make_order(order_id="older", side=OrderSide.BUY, price=98.0, quantity=2, timestamp=100)
-        newer = _make_order(order_id="newer", side=OrderSide.BUY, price=98.0, quantity=2, timestamp=200)
-        conservative_engine.process_order(older, book)
-        conservative_engine.process_order(newer, book)
-        conservative_engine.process_order(best_price, book)
-
-        trade = TradePrint(
-            timestamp=300, buyer="A", seller="B", symbol="X",
-            price=98.0, quantity=7, aggressor_side=None,
+    def test_sell_matches_market_trade(self):
+        engine = _make_engine(mode=TradeMatchingMode.ALL)
+        mt = _make_market_trade(price=100, quantity=10)
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, -5)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
         )
-        fills = conservative_engine.check_passive_fills(book, [trade])
+        assert len(fills) == 1
+        assert fills[0].price == 100.0
+        assert fills[0].side == OrderSide.SELL
 
-        assert [f.order_id for f in fills] == ["best", "older", "newer"]
-        assert [f.quantity for f in fills] == [4, 2, 1]
-
-    def test_aggressor_side_enforcement(self, conservative_engine):
-        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
-        buy_order = _make_order(order_id="buy", side=OrderSide.BUY, price=100.0, quantity=5)
-        sell_order = _make_order(order_id="sell", side=OrderSide.SELL, price=100.0, quantity=5)
-        conservative_engine.process_order(buy_order, book)
-        conservative_engine.process_order(sell_order, book)
-
-        buy_aggr_trade = TradePrint(
-            timestamp=200, buyer="A", seller="B", symbol="X",
-            price=100.0, quantity=3, aggressor_side=OrderSide.BUY,
+    def test_worse_mode_skips_equal_price(self):
+        engine = _make_engine(mode=TradeMatchingMode.WORSE)
+        mt = _make_market_trade(price=100, quantity=10)
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, 5)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
         )
-        fills = conservative_engine.check_passive_fills(book, [buy_aggr_trade])
-        assert [f.order_id for f in fills] == ["sell"]
+        # WORSE mode: trade at 100 == order at 100, so no fill
+        assert fills == []
 
-        sell_aggr_trade = TradePrint(
-            timestamp=201, buyer="A", seller="B", symbol="X",
-            price=100.0, quantity=3, aggressor_side=OrderSide.SELL,
+    def test_worse_mode_fills_at_better_price(self):
+        engine = _make_engine(mode=TradeMatchingMode.WORSE)
+        mt = _make_market_trade(price=99, quantity=10)
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, 5)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
         )
-        fills = conservative_engine.check_passive_fills(book, [sell_aggr_trade])
-        assert [f.order_id for f in fills] == ["buy"]
+        # WORSE mode: trade at 99 < order at 100, so fills
+        assert len(fills) == 1
+        assert fills[0].price == 100.0  # at order price
 
-    def test_known_aggressor_requires_exact_trade_level(self, conservative_engine):
-        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
-        better_bid = _make_order(order_id="b1", side=OrderSide.BUY, price=99.0, quantity=5)
-        at_trade = _make_order(order_id="b2", side=OrderSide.BUY, price=98.0, quantity=5)
-        conservative_engine.process_order(better_bid, book)
-        conservative_engine.process_order(at_trade, book)
-
-        trade = TradePrint(
-            timestamp=250, buyer="A", seller="B", symbol="X",
-            price=98.0, quantity=5, aggressor_side=OrderSide.SELL,
+    def test_none_mode_skips_market_trades(self):
+        engine = _make_engine(mode=TradeMatchingMode.NONE)
+        mt = _make_market_trade(price=100, quantity=10)
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, 5)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
         )
-        fills = conservative_engine.check_passive_fills(book, [trade])
-        assert [f.order_id for f in fills] == ["b2"]
+        assert fills == []
 
-    def test_missing_aggressor_side_fallback_conservative(self, conservative_engine):
-        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
-        buy_order = _make_order(order_id="buy", side=OrderSide.BUY, price=100.0, quantity=5)
-        sell_order = _make_order(order_id="sell", side=OrderSide.SELL, price=102.0, quantity=5)
-        conservative_engine.process_order(buy_order, book)
-        conservative_engine.process_order(sell_order, book)
-
-        low_trade = TradePrint(
-            timestamp=200, buyer="A", seller="B", symbol="X",
-            price=100.0, quantity=2, aggressor_side=None,
+    def test_market_trade_capacity_consumed(self):
+        """Two orders consuming the same market trade."""
+        engine = _make_engine(mode=TradeMatchingMode.ALL)
+        mt = _make_market_trade(price=100, quantity=6)
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, 4), _Order("X", 100, 4)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
         )
-        high_trade = TradePrint(
-            timestamp=201, buyer="A", seller="B", symbol="X",
-            price=102.0, quantity=2, aggressor_side=None,
+        total_filled = sum(f.quantity for f in fills)
+        # Only 6 available from the market trade
+        assert total_filled == 6
+
+    def test_book_then_market_trade(self):
+        """Book partially fills, then market trade fills the rest."""
+        engine = _make_engine(mode=TradeMatchingMode.ALL)
+        mt = _make_market_trade(price=101, quantity=10)
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 8)],
+            buy_orders={99: 10},
+            sell_orders={101: -3},  # only 3 in book
+            market_trades=[mt],
         )
-
-        fills_low = conservative_engine.check_passive_fills(book, [low_trade])
-        assert [f.order_id for f in fills_low] == ["buy"]
-
-        fills_high = conservative_engine.check_passive_fills(book, [high_trade])
-        assert [f.order_id for f in fills_high] == ["sell"]
+        # 3 from book + 5 from market trade
+        assert len(fills) == 2
+        assert fills[0].quantity == 3
+        assert fills[0].price == 101.0  # book price
+        assert fills[0].is_aggressive is True
+        assert fills[1].quantity == 5
+        assert fills[1].price == 101.0  # order price
+        assert fills[1].is_aggressive is False
 
 
 # ======================================================================
-# Order cancellation
+# Position limit enforcement
 # ======================================================================
 
-class TestCancelOrder:
-    def test_cancel_resting_order(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 15)],
+class TestPositionLimits:
+    def test_per_fill_clamping_buy(self):
+        engine = _make_engine(limits={"X": 5})
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 10)],
+            buy_orders={99: 10},
+            sell_orders={101: -20},
+            market_trades=[],
         )
-        order = _make_order(order_id="cancel_me", side=OrderSide.BUY, price=98.0, quantity=5)
-        balanced_engine.process_order(order, book)
-        assert order.status == OrderStatus.ACTIVE
+        total = sum(f.quantity for f in fills)
+        assert total == 5  # clamped to limit
 
-        result = balanced_engine.cancel_order("cancel_me")
-        assert result is True
-        assert order.status == OrderStatus.CANCELLED
-
-    def test_cancel_nonexistent_order(self, balanced_engine):
-        result = balanced_engine.cancel_order("does_not_exist")
-        assert result is False
-
-    def test_cancelled_order_not_filled(self, balanced_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 15)],
+    def test_per_fill_clamping_sell(self):
+        engine = _make_engine(limits={"X": 5})
+        fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 99, -10)],
+            buy_orders={99: 20},
+            sell_orders={101: -10},
+            market_trades=[],
         )
-        order = _make_order(order_id="c1", side=OrderSide.BUY, price=98.0, quantity=5)
-        balanced_engine.process_order(order, book)
-        balanced_engine.cancel_order("c1")
+        total = sum(f.quantity for f in fills)
+        assert total == 5
 
-        # After cancellation, passive fill check should not fill it
-        trade = TradePrint(
-            timestamp=200, buyer="A", seller="B", symbol="X",
-            price=97.0, quantity=10,
+    def test_enforce_limits_aggregate_cancel(self):
+        engine = _make_engine(limits={"X": 10})
+        orders = {
+            "X": [_Order("X", 101, 6), _Order("X", 101, 6)],  # total 12 > 10
+        }
+        result = engine.enforce_limits(orders)
+        assert result["X"] == []
+
+    def test_enforce_limits_passes_within_limit(self):
+        engine = _make_engine(limits={"X": 20})
+        orders = {
+            "X": [_Order("X", 101, 5), _Order("X", 101, 5)],  # total 10 <= 20
+        }
+        result = engine.enforce_limits(orders)
+        assert len(result["X"]) == 2
+
+    def test_default_limit_used_for_unknown_product(self):
+        engine = _make_engine(limits={}, )
+        engine._default_limit = 50
+        fills = engine.match_orders(
+            product="Y",
+            orders=[_Order("Y", 101, 100)],
+            buy_orders={99: 10},
+            sell_orders={101: -200},
+            market_trades=[],
         )
-        passive_fills = balanced_engine.check_passive_fills(book, [trade])
-        assert passive_fills == []
+        total = sum(f.quantity for f in fills)
+        assert total == 50
 
 
 # ======================================================================
-# Fee application
+# Position tracking
 # ======================================================================
 
-class TestFeeApplication:
-    def test_fees_applied_to_buy(self):
-        engine = ExecutionEngine(
-            execution_model=ExecutionModel.BALANCED,
-            position_limits={"X": 100},
-            fees=0.5,
-            slippage=0.0,
+class TestPositionTracking:
+    def test_position_updated_after_buy(self):
+        engine = _make_engine()
+        engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 5)],
+            buy_orders={99: 10},
+            sell_orders={101: -20},
+            market_trades=[],
         )
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 20)],
-        )
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = engine.process_order(order, book)
+        assert engine.get_position("X") == 5
 
-        # Fee makes buy price worse: 101.0 + 0.5 = 101.5
-        assert fills[0].price == pytest.approx(101.5)
-
-    def test_fees_applied_to_sell(self):
-        engine = ExecutionEngine(
-            execution_model=ExecutionModel.BALANCED,
-            position_limits={"X": 100},
-            fees=0.5,
-            slippage=0.0,
+    def test_position_updated_after_sell(self):
+        engine = _make_engine()
+        engine.match_orders(
+            product="X",
+            orders=[_Order("X", 99, -5)],
+            buy_orders={99: 20},
+            sell_orders={101: -10},
+            market_trades=[],
         )
-        book = _make_book(
-            bids=[(99.0, 20)],
-            asks=[(101.0, 10)],
-        )
-        order = _make_order(side=OrderSide.SELL, price=99.0, quantity=5)
-        fills = engine.process_order(order, book)
+        assert engine.get_position("X") == -5
 
-        # Fee makes sell price worse: 99.0 - 0.5 = 98.5
-        assert fills[0].price == pytest.approx(98.5)
-
-    def test_slippage_applied(self):
-        engine = ExecutionEngine(
-            execution_model=ExecutionModel.BALANCED,
-            position_limits={"X": 100},
-            fees=0.0,
-            slippage=0.1,
+    def test_position_accumulates(self):
+        engine = _make_engine()
+        engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 3)],
+            buy_orders={99: 10},
+            sell_orders={101: -20},
+            market_trades=[],
         )
-        book = _make_book(
-            bids=[(99.0, 20)],
-            asks=[(101.0, 20)],
+        engine.match_orders(
+            product="X",
+            orders=[_Order("X", 101, 2)],
+            buy_orders={99: 10},
+            sell_orders={101: -20},
+            market_trades=[],
         )
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = engine.process_order(order, book)
-
-        # Slippage on aggressive buy: 101.0 + 0.1 = 101.1
-        assert fills[0].price == pytest.approx(101.1)
-
-    def test_fees_and_slippage_combined(self):
-        engine = ExecutionEngine(
-            execution_model=ExecutionModel.BALANCED,
-            position_limits={"X": 100},
-            fees=0.5,
-            slippage=0.1,
-        )
-        book = _make_book(
-            bids=[(99.0, 20)],
-            asks=[(101.0, 20)],
-        )
-        order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = engine.process_order(order, book)
-
-        # Slippage first: 101.0 + 0.1 = 101.1, then fee: 101.1 + 0.5 = 101.6
-        assert fills[0].price == pytest.approx(101.6)
+        assert engine.get_position("X") == 5

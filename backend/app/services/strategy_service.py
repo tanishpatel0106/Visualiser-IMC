@@ -8,7 +8,7 @@ from typing import Optional
 from app.engines.backtest.engine import BacktestEngine
 from app.engines.sandbox.runner import StrategySandbox
 from app.engines.strategies.registry import StrategyRegistry
-from app.models.backtest import BacktestConfig, BacktestRun
+from app.models.backtest import BacktestConfig, BacktestRun, _map_execution_model
 from app.services.dataset_service import DatasetService
 from app.storage.database import StorageService
 
@@ -161,14 +161,16 @@ class StrategyService:
         trader = self._sandbox.load_strategy(source)
 
         # Build backtest config
+        # Map legacy execution_model to trade_matching
+        trade_matching = _map_execution_model(
+            config.get("trade_matching", config.get("execution_model", "BALANCED"))
+        )
         bt_config = BacktestConfig(
             strategy_id=strategy_id,
             products=config.get("products", []),
             days=config.get("days", []),
-            execution_model=config.get("execution_model", "BALANCED"),
+            trade_matching=trade_matching,
             position_limits=config.get("position_limits", {}),
-            fees=config.get("fees", 0.0),
-            slippage=config.get("slippage", 0.0),
             initial_cash=config.get("initial_cash", 0.0),
             parameters=config.get("parameters", {}),
         )

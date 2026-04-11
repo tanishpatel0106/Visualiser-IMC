@@ -19,7 +19,7 @@ from app.models.trading import (
     PositionState,
     StrategyOrder,
 )
-from app.models.backtest import BacktestConfig, BacktestRun, ExecutionModel
+from app.models.backtest import BacktestConfig, BacktestRun, ExecutionModel, TradeMatchingMode
 from app.models.strategy import DebugFrame, StrategyDefinition, StrategyParameter
 
 
@@ -371,11 +371,9 @@ class TestPositionState:
 class TestBacktestConfig:
     def test_defaults(self):
         config = BacktestConfig(strategy_id="test")
-        assert config.execution_model == ExecutionModel.BALANCED
+        assert config.trade_matching == TradeMatchingMode.ALL
         assert config.products == []
         assert config.days == []
-        assert config.fees == 0.0
-        assert config.slippage == 0.0
         assert config.initial_cash == 0.0
         assert config.position_limits == {}
 
@@ -384,15 +382,26 @@ class TestBacktestConfig:
             strategy_id="mm",
             products=["EMERALDS", "TOMATOES"],
             days=[1, 2],
-            execution_model=ExecutionModel.CONSERVATIVE,
+            trade_matching=TradeMatchingMode.WORSE,
             position_limits={"EMERALDS": 20},
-            fees=0.5,
-            slippage=0.1,
             initial_cash=10000.0,
         )
-        assert config.execution_model == ExecutionModel.CONSERVATIVE
-        assert config.fees == 0.5
+        assert config.trade_matching == TradeMatchingMode.WORSE
         assert config.position_limits["EMERALDS"] == 20
+
+    def test_get_position_limit_builtin(self):
+        config = BacktestConfig(strategy_id="test")
+        # RAINFOREST_RESIN has a built-in limit of 50
+        assert config.get_position_limit("RAINFOREST_RESIN") == 50
+        # Unknown product falls back to DEFAULT_POSITION_LIMIT (50)
+        assert config.get_position_limit("UNKNOWN_PRODUCT") == 50
+
+    def test_get_position_limit_custom_override(self):
+        config = BacktestConfig(
+            strategy_id="test",
+            position_limits={"RAINFOREST_RESIN": 100},
+        )
+        assert config.get_position_limit("RAINFOREST_RESIN") == 100
 
 
 # ======================================================================
