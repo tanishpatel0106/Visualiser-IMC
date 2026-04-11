@@ -10,7 +10,6 @@ and enforces position limits, fees, and slippage.
 """
 
 import uuid
-from typing import Optional
 
 from app.models.backtest import ExecutionModel
 from app.models.market import (
@@ -88,7 +87,6 @@ class ExecutionEngine:
         self,
         order: StrategyOrder,
         book: VisibleOrderBook,
-        recent_trades: list[TradePrint],
     ) -> list[FillEvent]:
         """Process a new order against the current visible book.
 
@@ -149,92 +147,20 @@ class ExecutionEngine:
         book: VisibleOrderBook,
         trades: list[TradePrint],
     ) -> list[FillEvent]:
-        """Check all resting passive orders for potential fills.
+        """Allocate each trade print's quantity globally across eligible
+        resting orders using price-time priority.
 
-        The fill logic depends on the execution model:
-
-        CONSERVATIVE -- Passive fills occur only when an actual trade
-            print exists at a price equal to or better than the resting
-            order price. This is the most realistic model because it
-            requires evidence that liquidity was actually taken at that
-            level.
-
-        BALANCED -- Fills use a combination of trade-flow evidence and
-            book movement heuristics. A resting order fills if (a) a
-            trade print occurs at or through the price, OR (b) the
-            opposing best quote moves through the resting price,
-            suggesting the level was consumed.
-
-        OPTIMISTIC -- Fills whenever the market price merely touches the
-            resting level, regardless of actual trade evidence. This
-            overstates fill probability and is useful for upper-bound
-            estimates.
+        This method processes passive fills conservatively:
+        - A trade print can only be consumed once.
+        - Total passive fill quantity from one trade never exceeds the
+          printed trade quantity.
+        - If aggressor_side is known, side direction is enforced.
+        - If aggressor_side is missing, fallback is conservative
+          price-based eligibility.
         """
         fills: list[FillEvent] = []
-        filled_order_ids: list[str] = []
-
-        for order_id, order in list(self._resting_orders.items()):
-            if order.product != book.product:
-                continue
-
-            fill_qty = self._evaluate_passive_fill(order, book, trades)
-            if fill_qty <= 0:
-                continue
-
-            fill_qty = min(fill_qty, order.remaining_quantity)
-
-            # Enforce position limits on passive fills too
-            limit = self._position_limits.get(order.product)
-            if limit is not None:
-                current_pos = self.get_position(order.product)
-                if order.side == OrderSide.BUY:
-                    max_buy = max(0, limit - current_pos)
-                    fill_qty = min(fill_qty, max_buy)
-                else:
-                    max_sell = max(0, limit + current_pos)
-                    fill_qty = min(fill_qty, max_sell)
-                if fill_qty <= 0:
-                    continue
-
-            fill = FillEvent(
-                order_id=order.order_id,
-                product=order.product,
-                side=order.side,
-                price=self._apply_fees(order.price, order.side),
-                quantity=fill_qty,
-                timestamp=book.timestamp,
-                is_aggressive=False,
-            )
-            fills.append(fill)
-
-            # Update internal position so subsequent fills in this loop
-            # respect the updated position for limit checks.
-            current_pos = self.get_position(order.product)
-            if order.side == OrderSide.BUY:
-                self._positions[order.product] = current_pos + fill_qty
-            else:
-                self._positions[order.product] = current_pos - fill_qty
-
-            # Update the order state
-            order.filled_quantity += fill_qty
-            order.avg_fill_price = self._update_avg_price(
-                order.avg_fill_price,
-                order.filled_quantity - fill_qty,
-                order.price,
-                fill_qty,
-            )
-            order.updated_at = book.timestamp
-
-            if order.remaining_quantity == 0:
-                order.status = OrderStatus.FILLED
-                filled_order_ids.append(order_id)
-            else:
-                order.status = OrderStatus.PARTIAL_FILL
-
-        # Remove fully filled orders from resting book
-        for oid in filled_order_ids:
-            self._resting_orders.pop(oid, None)
-
+        for trade in trades:
+            fills.extend(self._allocate_passive_fills_for_trade(book, trade))
         return fills
 
     # ------------------------------------------------------------------
@@ -381,116 +307,159 @@ class ExecutionEngine:
         return fills
 
     # ------------------------------------------------------------------
-    # Internal: passive fill evaluation
+    # Internal: passive fill allocation
     # ------------------------------------------------------------------
-
-    def _evaluate_passive_fill(
+    def _allocate_passive_fills_for_trade(
         self,
-        order: StrategyOrder,
         book: VisibleOrderBook,
-        trades: list[TradePrint],
-    ) -> int:
-        """Evaluate how many units of a resting order should fill,
-        based on the current execution model.
+        trade: TradePrint,
+    ) -> list[FillEvent]:
+        """Allocate a single trade print across eligible resting orders."""
+        if trade.symbol != book.product or trade.quantity <= 0:
+            return []
 
-        Returns the fill quantity (0 if no fill).
-        """
-        if self._execution_model == ExecutionModel.CONSERVATIVE:
-            return self._eval_conservative(order, book, trades)
-        elif self._execution_model == ExecutionModel.BALANCED:
-            return self._eval_balanced(order, book, trades)
-        else:  # OPTIMISTIC
-            return self._eval_optimistic(order, book, trades)
+        candidates = self._eligible_resting_orders_for_trade(trade)
+        if not candidates:
+            return []
 
-    def _eval_conservative(
-        self,
-        order: StrategyOrder,
-        book: VisibleOrderBook,
-        trades: list[TradePrint],
-    ) -> int:
-        """CONSERVATIVE model: passive fills only when actual trade prints
-        occur at or through the resting price.
+        remaining_trade_qty = trade.quantity
+        fills: list[FillEvent] = []
+        fully_filled_order_ids: list[str] = []
 
-        For a resting BUY at price P, a fill occurs only if a trade
-        printed at price <= P (someone sold at or below our bid).
-        For a resting SELL at price P, a fill occurs only if a trade
-        printed at price >= P (someone bought at or above our ask).
+        for order in candidates:
+            if remaining_trade_qty <= 0:
+                break
 
-        The fill quantity is capped at the total volume of qualifying
-        trade prints (we can only capture volume that actually traded
-        through our level).
-        """
-        qualifying_volume = 0
-
-        for trade in trades:
-            if trade.symbol != order.product:
+            fill_qty = min(order.remaining_quantity, remaining_trade_qty)
+            fill_qty = self._apply_passive_position_limits(order, fill_qty)
+            if fill_qty <= 0:
                 continue
 
-            if order.side == OrderSide.BUY and trade.price <= order.price:
-                qualifying_volume += trade.quantity
-            elif order.side == OrderSide.SELL and trade.price >= order.price:
-                qualifying_volume += trade.quantity
+            fill = FillEvent(
+                order_id=order.order_id,
+                product=order.product,
+                side=order.side,
+                price=self._apply_fees(order.price, order.side),
+                quantity=fill_qty,
+                timestamp=trade.timestamp,
+                is_aggressive=False,
+            )
+            fills.append(fill)
 
-        return min(qualifying_volume, order.remaining_quantity)
+            self._apply_order_fill(order, fill_qty, trade.timestamp)
+            self._apply_position_delta(order.product, order.side, fill_qty)
+            remaining_trade_qty -= fill_qty
 
-    def _eval_balanced(
+            if order.remaining_quantity == 0:
+                fully_filled_order_ids.append(order.order_id)
+
+        for order_id in fully_filled_order_ids:
+            self._resting_orders.pop(order_id, None)
+
+        return fills
+
+    def _eligible_resting_orders_for_trade(
+        self,
+        trade: TradePrint,
+    ) -> list[StrategyOrder]:
+        """Return eligible resting orders sorted by strict price-time
+        priority with deterministic tie-breaks."""
+        eligible = [
+            order
+            for order in self._resting_orders.values()
+            if order.product == trade.symbol
+            and order.remaining_quantity > 0
+            and self._trade_can_fill_order(trade, order)
+        ]
+
+        if not eligible:
+            return []
+
+        if self._target_order_side_for_trade(trade) == OrderSide.BUY:
+            # Better BUY price is higher.
+            eligible.sort(key=lambda o: (-o.price, o.timestamp, o.order_id))
+        elif self._target_order_side_for_trade(trade) == OrderSide.SELL:
+            # Better SELL price is lower.
+            eligible.sort(key=lambda o: (o.price, o.timestamp, o.order_id))
+        else:
+            # Unknown side fallback: still keep side-local price-time
+            # priority (BUY high->low, SELL low->high).
+            eligible.sort(
+                key=lambda o: (
+                    0 if o.side == OrderSide.BUY else 1,
+                    -o.price if o.side == OrderSide.BUY else o.price,
+                    o.timestamp,
+                    o.order_id,
+                )
+            )
+
+        return eligible
+
+    @staticmethod
+    def _target_order_side_for_trade(trade: TradePrint) -> str | None:
+        if trade.aggressor_side == OrderSide.SELL:
+            return OrderSide.BUY
+        if trade.aggressor_side == OrderSide.BUY:
+            return OrderSide.SELL
+        return None
+
+    def _trade_can_fill_order(self, trade: TradePrint, order: StrategyOrder) -> bool:
+        """Check side + price compatibility between one trade and one order."""
+        target_side = self._target_order_side_for_trade(trade)
+        if target_side is not None and order.side != target_side:
+            return False
+
+        # When aggressor side is known, enforce strict conservative
+        # price matching: we only fill at the traded level itself.
+        if target_side is not None:
+            return abs(trade.price - order.price) < 1e-9
+
+        # Fallback (unknown aggressor side): conservative price-based
+        # compatibility only.
+        if order.side == OrderSide.BUY:
+            return trade.price <= order.price
+        return trade.price >= order.price
+
+    def _apply_passive_position_limits(self, order: StrategyOrder, qty: int) -> int:
+        """Cap passive fill size so positions remain within limits."""
+        limit = self._position_limits.get(order.product)
+        if limit is None:
+            return qty
+
+        current_pos = self.get_position(order.product)
+        if order.side == OrderSide.BUY:
+            max_qty = max(0, limit - current_pos)
+        else:
+            max_qty = max(0, limit + current_pos)
+
+        return min(qty, max_qty)
+
+    def _apply_position_delta(self, product: str, side: OrderSide, qty: int) -> None:
+        current_pos = self.get_position(product)
+        if side == OrderSide.BUY:
+            self._positions[product] = current_pos + qty
+        else:
+            self._positions[product] = current_pos - qty
+
+    def _apply_order_fill(
         self,
         order: StrategyOrder,
-        book: VisibleOrderBook,
-        trades: list[TradePrint],
-    ) -> int:
-        """BALANCED model: fills based on trade flow + book movement.
-
-        A resting order fills if:
-        (a) Trade prints occur at or through the resting price (same as
-            conservative), OR
-        (b) The opposing best quote has moved through the resting price,
-            indicating the level was consumed by other participants.
-
-        For condition (b), we fill the full remaining quantity since the
-        price level was clearly traded through.
-        """
-        # First check trade-based fills (same as conservative)
-        trade_volume = self._eval_conservative(order, book, trades)
-        if trade_volume > 0:
-            return trade_volume
-
-        # Check book-movement heuristic: has the opposing side moved
-        # through our resting price?
-        if order.side == OrderSide.BUY:
-            # If best ask has dropped to or below our bid, the level traded through
-            if book.best_ask is not None and book.best_ask <= order.price:
-                return order.remaining_quantity
+        fill_qty: int,
+        timestamp: int,
+    ) -> None:
+        previous_filled = order.filled_quantity
+        order.filled_quantity += fill_qty
+        order.avg_fill_price = self._update_avg_price(
+            order.avg_fill_price,
+            previous_filled,
+            order.price,
+            fill_qty,
+        )
+        order.updated_at = timestamp
+        if order.remaining_quantity == 0:
+            order.status = OrderStatus.FILLED
         else:
-            # If best bid has risen to or above our ask, the level traded through
-            if book.best_bid is not None and book.best_bid >= order.price:
-                return order.remaining_quantity
-
-        return 0
-
-    def _eval_optimistic(
-        self,
-        order: StrategyOrder,
-        book: VisibleOrderBook,
-        trades: list[TradePrint],
-    ) -> int:
-        """OPTIMISTIC model: fill when the market price touches the
-        resting level.
-
-        A resting BUY fills if the best ask <= resting price.
-        A resting SELL fills if the best bid >= resting price.
-
-        This is the most aggressive fill assumption and will overstate
-        profitability for passive strategies. Useful as an upper bound.
-        """
-        if order.side == OrderSide.BUY:
-            if book.best_ask is not None and book.best_ask <= order.price:
-                return order.remaining_quantity
-        else:
-            if book.best_bid is not None and book.best_bid >= order.price:
-                return order.remaining_quantity
-
-        return 0
+            order.status = OrderStatus.PARTIAL_FILL
 
     # ------------------------------------------------------------------
     # Internal: position limit enforcement

@@ -99,6 +99,34 @@ class _ReadTraderDataTrader:
         return {}, 0, state.traderData
 
 
+class _SinglePassiveBuyTrader:
+    """Places one passive buy then no-op."""
+
+    def __init__(self):
+        self._placed = False
+
+    def run(self, state):
+        from app.engines.sandbox.adapter import Order
+        if self._placed:
+            return {}, 0, ""
+        self._placed = True
+        return {"X": [Order("X", 98, 4)]}, 0, ""
+
+
+class _CaptureDepthTrader:
+    """Captures order depth products for assertion."""
+
+    def __init__(self):
+        self.snapshots: list[dict[str, tuple[int, int]]] = []
+
+    def run(self, state):
+        snap: dict[str, tuple[int, int]] = {}
+        for product, depth in state.order_depths.items():
+            snap[product] = (len(depth.buy_orders), len(depth.sell_orders))
+        self.snapshots.append(snap)
+        return {}, 0, ""
+
+
 # ======================================================================
 # Basic backtest run
 # ======================================================================
@@ -229,6 +257,47 @@ class TestFillRecording:
         assert fills[0].product == "X"
         assert fills[0].side == OrderSide.BUY
         assert fills[0].quantity == 1
+
+
+class TestPassiveFlowAndBookIsolation:
+    def test_trade_print_not_reused_on_next_book_snapshot(self):
+        config = BacktestConfig(
+            strategy_id="passive_once",
+            products=["X"],
+            execution_model=ExecutionModel.CONSERVATIVE,
+            position_limits={"X": 20},
+        )
+        engine = BacktestEngine(config)
+        events = [
+            _make_book_event(100, product="X", bid=99.0, ask=101.0),
+            _make_trade_event(110, product="X", price=98.0, quantity=3),
+            _make_book_event(120, product="X", bid=99.0, ask=101.0),
+        ]
+        engine.run(events, _SinglePassiveBuyTrader())
+        fills = engine.get_fills()
+
+        assert len(fills) == 1
+        assert fills[0].quantity == 3
+        assert fills[0].timestamp == 110
+
+    def test_missing_product_book_is_not_substituted(self):
+        config = BacktestConfig(
+            strategy_id="capture_depth",
+            products=["X", "Y"],
+            execution_model=ExecutionModel.CONSERVATIVE,
+            position_limits={"X": 20, "Y": 20},
+        )
+        engine = BacktestEngine(config)
+        trader = _CaptureDepthTrader()
+        events = [
+            _make_book_event(100, product="X", bid=99.0, ask=101.0),
+        ]
+        engine.run(events, trader)
+
+        assert trader.snapshots
+        first = trader.snapshots[0]
+        assert first["X"] == (1, 1)
+        assert first["Y"] == (0, 0)
 
 
 # ======================================================================

@@ -89,7 +89,7 @@ class TestAggressiveBuyFill:
             asks=[(101.0, 20)],
         )
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert len(fills) == 1
         assert fills[0].price == pytest.approx(101.0)
@@ -103,7 +103,7 @@ class TestAggressiveBuyFill:
             asks=[(101.0, 5), (102.0, 10)],
         )
         order = _make_order(side=OrderSide.BUY, price=102.0, quantity=8)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert len(fills) == 2
         assert fills[0].price == pytest.approx(101.0)
@@ -124,7 +124,7 @@ class TestAggressiveSellFill:
             asks=[(101.0, 10)],
         )
         order = _make_order(side=OrderSide.SELL, price=99.0, quantity=5)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert len(fills) == 1
         assert fills[0].price == pytest.approx(99.0)
@@ -137,7 +137,7 @@ class TestAggressiveSellFill:
             asks=[(101.0, 10)],
         )
         order = _make_order(side=OrderSide.SELL, price=98.0, quantity=7)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert len(fills) == 2
         assert fills[0].quantity == 3  # consume 99.0 level
@@ -155,7 +155,7 @@ class TestPartialFill:
             asks=[(101.0, 3)],
         )
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=10)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert len(fills) == 1
         assert fills[0].quantity == 3
@@ -177,7 +177,7 @@ class TestPositionLimitRejection:
         )
         # Limit for X is 20; buying 25 from position 0 would give pos=25 > 20
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=25)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert fills == []
         assert order.status == OrderStatus.REJECTED
@@ -188,7 +188,7 @@ class TestPositionLimitRejection:
             asks=[(101.0, 10)],
         )
         order = _make_order(side=OrderSide.SELL, price=99.0, quantity=25)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert fills == []
         assert order.status == OrderStatus.REJECTED
@@ -199,7 +199,7 @@ class TestPositionLimitRejection:
             asks=[(101.0, 50)],
         )
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=15)
-        fills = balanced_engine.process_order(order, book, [])
+        fills = balanced_engine.process_order(order, book)
 
         assert len(fills) > 0
 
@@ -215,7 +215,7 @@ class TestPositionLimitRejection:
             asks=[(101.0, 1000)],
         )
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=500)
-        fills = engine.process_order(order, book, [])
+        fills = engine.process_order(order, book)
         assert sum(f.quantity for f in fills) == 500
 
 
@@ -231,7 +231,7 @@ class TestPassiveFillConservative:
         )
         # Place a passive buy at 98.0 (below best ask, so rests)
         order = _make_order(side=OrderSide.BUY, price=98.0, quantity=5)
-        fills = conservative_engine.process_order(order, book, [])
+        fills = conservative_engine.process_order(order, book)
         assert fills == []  # rests passively
         assert order.status == OrderStatus.ACTIVE
 
@@ -251,7 +251,7 @@ class TestPassiveFillConservative:
             asks=[(101.0, 15)],
         )
         order = _make_order(side=OrderSide.BUY, price=98.0, quantity=5)
-        conservative_engine.process_order(order, book, [])
+        conservative_engine.process_order(order, book)
 
         # No trades -- no fills in conservative mode
         passive_fills = conservative_engine.check_passive_fills(book, [])
@@ -259,41 +259,104 @@ class TestPassiveFillConservative:
 
 
 # ======================================================================
-# Passive fill in OPTIMISTIC mode
+# Passive allocation realism checks
 # ======================================================================
 
-class TestPassiveFillOptimistic:
-    def test_passive_fill_when_price_touches(self, optimistic_engine):
-        # Place a passive buy at 100.0
-        book1 = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 15)],
-        )
-        order = _make_order(side=OrderSide.BUY, price=100.0, quantity=5)
-        optimistic_engine.process_order(order, book1, [])
-        assert order.status == OrderStatus.ACTIVE
+class TestPassiveAllocation:
+    def test_global_trade_quantity_consumption(self, conservative_engine):
+        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
+        o1 = _make_order(order_id="o1", side=OrderSide.BUY, price=97.0, quantity=5, timestamp=100)
+        o2 = _make_order(order_id="o2", side=OrderSide.BUY, price=97.0, quantity=5, timestamp=101)
+        conservative_engine.process_order(o1, book)
+        conservative_engine.process_order(o2, book)
 
-        # Book moves: best ask drops to 100.0, touching our resting buy
-        book2 = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(100.0, 15)],
-            timestamp=200,
+        trade = TradePrint(
+            timestamp=200, buyer="A", seller="B", symbol="X",
+            price=97.0, quantity=6, aggressor_side=OrderSide.SELL,
         )
-        passive_fills = optimistic_engine.check_passive_fills(book2, [])
-        assert len(passive_fills) == 1
-        assert passive_fills[0].quantity == 5
+        fills = conservative_engine.check_passive_fills(book, [trade])
 
-    def test_no_fill_when_price_doesnt_touch(self, optimistic_engine):
-        book = _make_book(
-            bids=[(99.0, 10)],
-            asks=[(101.0, 15)],
+        assert sum(f.quantity for f in fills) == 6
+        assert len(fills) == 2
+        assert fills[0].order_id == "o1"
+        assert fills[0].quantity == 5
+        assert fills[1].order_id == "o2"
+        assert fills[1].quantity == 1
+
+    def test_price_time_priority(self, conservative_engine):
+        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
+        best_price = _make_order(order_id="best", side=OrderSide.BUY, price=99.0, quantity=4, timestamp=101)
+        older = _make_order(order_id="older", side=OrderSide.BUY, price=98.0, quantity=2, timestamp=100)
+        newer = _make_order(order_id="newer", side=OrderSide.BUY, price=98.0, quantity=2, timestamp=200)
+        conservative_engine.process_order(older, book)
+        conservative_engine.process_order(newer, book)
+        conservative_engine.process_order(best_price, book)
+
+        trade = TradePrint(
+            timestamp=300, buyer="A", seller="B", symbol="X",
+            price=98.0, quantity=7, aggressor_side=None,
         )
-        order = _make_order(side=OrderSide.BUY, price=98.0, quantity=5)
-        optimistic_engine.process_order(order, book, [])
+        fills = conservative_engine.check_passive_fills(book, [trade])
 
-        # Ask is still at 101, never touches 98
-        passive_fills = optimistic_engine.check_passive_fills(book, [])
-        assert passive_fills == []
+        assert [f.order_id for f in fills] == ["best", "older", "newer"]
+        assert [f.quantity for f in fills] == [4, 2, 1]
+
+    def test_aggressor_side_enforcement(self, conservative_engine):
+        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
+        buy_order = _make_order(order_id="buy", side=OrderSide.BUY, price=100.0, quantity=5)
+        sell_order = _make_order(order_id="sell", side=OrderSide.SELL, price=100.0, quantity=5)
+        conservative_engine.process_order(buy_order, book)
+        conservative_engine.process_order(sell_order, book)
+
+        buy_aggr_trade = TradePrint(
+            timestamp=200, buyer="A", seller="B", symbol="X",
+            price=100.0, quantity=3, aggressor_side=OrderSide.BUY,
+        )
+        fills = conservative_engine.check_passive_fills(book, [buy_aggr_trade])
+        assert [f.order_id for f in fills] == ["sell"]
+
+        sell_aggr_trade = TradePrint(
+            timestamp=201, buyer="A", seller="B", symbol="X",
+            price=100.0, quantity=3, aggressor_side=OrderSide.SELL,
+        )
+        fills = conservative_engine.check_passive_fills(book, [sell_aggr_trade])
+        assert [f.order_id for f in fills] == ["buy"]
+
+    def test_known_aggressor_requires_exact_trade_level(self, conservative_engine):
+        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
+        better_bid = _make_order(order_id="b1", side=OrderSide.BUY, price=99.0, quantity=5)
+        at_trade = _make_order(order_id="b2", side=OrderSide.BUY, price=98.0, quantity=5)
+        conservative_engine.process_order(better_bid, book)
+        conservative_engine.process_order(at_trade, book)
+
+        trade = TradePrint(
+            timestamp=250, buyer="A", seller="B", symbol="X",
+            price=98.0, quantity=5, aggressor_side=OrderSide.SELL,
+        )
+        fills = conservative_engine.check_passive_fills(book, [trade])
+        assert [f.order_id for f in fills] == ["b2"]
+
+    def test_missing_aggressor_side_fallback_conservative(self, conservative_engine):
+        book = _make_book(bids=[(99.0, 10)], asks=[(101.0, 10)])
+        buy_order = _make_order(order_id="buy", side=OrderSide.BUY, price=100.0, quantity=5)
+        sell_order = _make_order(order_id="sell", side=OrderSide.SELL, price=102.0, quantity=5)
+        conservative_engine.process_order(buy_order, book)
+        conservative_engine.process_order(sell_order, book)
+
+        low_trade = TradePrint(
+            timestamp=200, buyer="A", seller="B", symbol="X",
+            price=100.0, quantity=2, aggressor_side=None,
+        )
+        high_trade = TradePrint(
+            timestamp=201, buyer="A", seller="B", symbol="X",
+            price=102.0, quantity=2, aggressor_side=None,
+        )
+
+        fills_low = conservative_engine.check_passive_fills(book, [low_trade])
+        assert [f.order_id for f in fills_low] == ["buy"]
+
+        fills_high = conservative_engine.check_passive_fills(book, [high_trade])
+        assert [f.order_id for f in fills_high] == ["sell"]
 
 
 # ======================================================================
@@ -307,7 +370,7 @@ class TestCancelOrder:
             asks=[(101.0, 15)],
         )
         order = _make_order(order_id="cancel_me", side=OrderSide.BUY, price=98.0, quantity=5)
-        balanced_engine.process_order(order, book, [])
+        balanced_engine.process_order(order, book)
         assert order.status == OrderStatus.ACTIVE
 
         result = balanced_engine.cancel_order("cancel_me")
@@ -324,7 +387,7 @@ class TestCancelOrder:
             asks=[(101.0, 15)],
         )
         order = _make_order(order_id="c1", side=OrderSide.BUY, price=98.0, quantity=5)
-        balanced_engine.process_order(order, book, [])
+        balanced_engine.process_order(order, book)
         balanced_engine.cancel_order("c1")
 
         # After cancellation, passive fill check should not fill it
@@ -353,7 +416,7 @@ class TestFeeApplication:
             asks=[(101.0, 20)],
         )
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = engine.process_order(order, book, [])
+        fills = engine.process_order(order, book)
 
         # Fee makes buy price worse: 101.0 + 0.5 = 101.5
         assert fills[0].price == pytest.approx(101.5)
@@ -370,7 +433,7 @@ class TestFeeApplication:
             asks=[(101.0, 10)],
         )
         order = _make_order(side=OrderSide.SELL, price=99.0, quantity=5)
-        fills = engine.process_order(order, book, [])
+        fills = engine.process_order(order, book)
 
         # Fee makes sell price worse: 99.0 - 0.5 = 98.5
         assert fills[0].price == pytest.approx(98.5)
@@ -387,7 +450,7 @@ class TestFeeApplication:
             asks=[(101.0, 20)],
         )
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = engine.process_order(order, book, [])
+        fills = engine.process_order(order, book)
 
         # Slippage on aggressive buy: 101.0 + 0.1 = 101.1
         assert fills[0].price == pytest.approx(101.1)
@@ -404,7 +467,7 @@ class TestFeeApplication:
             asks=[(101.0, 20)],
         )
         order = _make_order(side=OrderSide.BUY, price=101.0, quantity=5)
-        fills = engine.process_order(order, book, [])
+        fills = engine.process_order(order, book)
 
         # Slippage first: 101.0 + 0.1 = 101.1, then fee: 101.1 + 0.5 = 101.6
         assert fills[0].price == pytest.approx(101.6)
