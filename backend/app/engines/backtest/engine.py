@@ -185,14 +185,9 @@ class BacktestEngine:
         )
         book = self._book_engine.update_from_snapshot(snapshot)
 
-        # Check for passive fills on resting orders
-        recent = self._recent_trades.get(product, [])
-        passive_fills = self._execution_engine.check_passive_fills(book, recent)
-        self._process_fills(passive_fills, book)
-
         # Build Prosperity-compatible state for the strategy
         products = self._config.products or [product]
-        books = {p: self._book_engine.get_current_book(p) or book for p in products}
+        books = {p: self._book_engine.get_current_book(p) for p in products}
 
         state = self._adapter.build_state(
             timestamp=event.timestamp,
@@ -225,7 +220,7 @@ class BacktestEngine:
         # Process each order through the execution engine
         tick_fills: list[FillEvent] = []
         for order in strategy_orders:
-            fills = self._execution_engine.process_order(order, book, recent)
+            fills = self._execution_engine.process_order(order, book)
             tick_fills.extend(fills)
 
         self._process_fills(tick_fills, book)
@@ -239,7 +234,7 @@ class BacktestEngine:
 
         # Build debug frame
         debug_frame = self._build_debug_frame(
-            event, book, strategy_orders, tick_fills + passive_fills, raw_orders
+            event, book, strategy_orders, tick_fills, raw_orders
         )
         self._debug_frames.append(debug_frame)
 
