@@ -99,12 +99,44 @@ class Order:
         return f"Order(symbol={self.symbol!r}, price={self.price}, qty={self.quantity})"
 
 
+class ConversionObservation:
+    """Conversion observation for a product (e.g. ORCHIDS).
+
+    Provides bid/ask prices, fees, and tariffs for the southern
+    archipelago conversion channel used in Prosperity.
+    """
+
+    def __init__(
+        self,
+        bidPrice: float,
+        askPrice: float,
+        transportFees: float,
+        exportTariff: float,
+        importTariff: float,
+        sunlight: float = 0.0,
+        humidity: float = 0.0,
+    ) -> None:
+        self.bidPrice = bidPrice
+        self.askPrice = askPrice
+        self.transportFees = transportFees
+        self.exportTariff = exportTariff
+        self.importTariff = importTariff
+        self.sunlight = sunlight
+        self.humidity = humidity
+
+    def __repr__(self) -> str:
+        return (
+            f"ConversionObservation(bid={self.bidPrice}, ask={self.askPrice}, "
+            f"transport={self.transportFees})"
+        )
+
+
 class Observation:
     """Observations container (placeholder for future enrichment)."""
 
     def __init__(self) -> None:
         self.plainValueObservations: dict[str, float] = {}
-        self.conversionObservations: dict[str, object] = {}
+        self.conversionObservations: dict[str, "ConversionObservation"] = {}
 
 
 class TradingState:

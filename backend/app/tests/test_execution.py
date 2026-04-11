@@ -381,3 +381,66 @@ class TestPositionTracking:
             market_trades=[],
         )
         assert engine.get_position("X") == 5
+
+
+# ======================================================================
+# Fix #2: Single shared capacity prevents double-consumption
+# ======================================================================
+
+class TestMarketTradeSingleCapacity:
+    """A single MarketTrade should NOT fill both a buy and sell for
+    the full printed size.  remaining_quantity is a shared pool."""
+
+    def test_buy_then_sell_shares_capacity(self):
+        engine = _make_engine(mode=TradeMatchingMode.ALL, limits={"X": 20})
+        mt = _make_market_trade(price=100, quantity=10)
+
+        # First: buy 7 units via market trade
+        fills_buy = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, 7)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
+        )
+        assert sum(f.quantity for f in fills_buy) == 7
+        assert mt.remaining_quantity == 3  # 10 - 7
+
+        # Reset position so sell isn't blocked by limit
+        engine.update_position("X", 0)
+
+        # Second: sell against the SAME market trade — only 3 left
+        fills_sell = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, -10)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
+        )
+        assert sum(f.quantity for f in fills_sell) == 3
+        assert mt.remaining_quantity == 0
+
+    def test_opposite_sides_total_capped_at_trade_quantity(self):
+        """Buy + sell against the same market trade can never exceed its quantity."""
+        engine = _make_engine(mode=TradeMatchingMode.ALL, limits={"X": 20})
+        mt = _make_market_trade(price=100, quantity=6)
+
+        buy_fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, 4)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
+        )
+        engine.update_position("X", 0)
+
+        sell_fills = engine.match_orders(
+            product="X",
+            orders=[_Order("X", 100, -4)],
+            buy_orders={},
+            sell_orders={},
+            market_trades=[mt],
+        )
+
+        total = sum(f.quantity for f in buy_fills) + sum(f.quantity for f in sell_fills)
+        assert total == 6  # capped at trade quantity

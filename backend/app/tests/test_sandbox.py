@@ -341,3 +341,42 @@ class TestProsperityAdapterParseOrders:
         assert len(strategy_orders) == 2
         products = {o.product for o in strategy_orders}
         assert products == {"A", "B"}
+
+
+# ======================================================================
+# Fix #1: Strategy execution timeout enforcement
+# ======================================================================
+
+SLOW_STRATEGY = """
+import time
+
+class Trader:
+    def run(self, state):
+        time.sleep(10)
+        return {}, 0, ""
+"""
+
+
+class TestStrategyTimeout:
+    def test_timeout_returns_error(self):
+        sandbox = StrategySandbox(timeout=0.5)
+        strategy = sandbox.load_strategy(SLOW_STRATEGY)
+        state = TradingState()
+
+        orders, conversions, trader_data = sandbox.execute_strategy(
+            strategy, state, timeout=0.5,
+        )
+        assert orders == {}
+        assert conversions == 0
+        assert "timed out" in trader_data
+
+    def test_fast_strategy_completes(self):
+        sandbox = StrategySandbox(timeout=5.0)
+        strategy = sandbox.load_strategy(VALID_STRATEGY)
+        state = TradingState()
+
+        orders, conversions, trader_data = sandbox.execute_strategy(
+            strategy, state, timeout=5.0,
+        )
+        # Should complete normally, no timeout
+        assert "timed out" not in (trader_data or "")

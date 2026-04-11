@@ -50,7 +50,8 @@ class ReplayService:
 
         # Trade buffers
         self._own_trades: dict[str, list[TradePrint]] = {}
-        self._market_trades: dict[str, list[TradePrint]] = {}
+        self._market_trades: dict[str, list[TradePrint]] = {}  # leftovers from previous matching
+        self._pending_market_trades: dict[str, list[TradePrint]] = {}  # trades since last strategy call
         self._strategy_fills: list[dict] = []
 
     # ------------------------------------------------------------------
@@ -85,6 +86,7 @@ class ReplayService:
         self._mid_prices = {}
         self._own_trades = {p: [] for p in products}
         self._market_trades = {p: [] for p in products}
+        self._pending_market_trades = {p: [] for p in products}
         self._strategy_fills = []
 
         # If strategy_id is provided, set up strategy execution
@@ -200,23 +202,22 @@ class ReplayService:
             result["state"]["pnl"] = pnl
             result["state"]["positions"] = self._build_strategy_positions()
 
-        # Accumulate market trades for strategy context
+        # Buffer market trades for matching at next strategy call (Fix #3)
         if self._strategy_active and event.event_type == EventType.TRADE_PRINT:
             product = event.product or event.data.get("symbol", "")
-            if product in self._market_trades:
-                trade = TradePrint(
-                    timestamp=event.timestamp,
-                    buyer=event.data.get("buyer", ""),
-                    seller=event.data.get("seller", ""),
-                    symbol=product,
-                    currency=event.data.get("currency", "SEASHELLS"),
-                    price=event.data.get("price", 0.0),
-                    quantity=event.data.get("quantity", 0),
-                    aggressor_side=event.data.get("aggressor_side"),
-                )
-                self._market_trades[product].append(trade)
-                if len(self._market_trades[product]) > 50:
-                    self._market_trades[product] = self._market_trades[product][-50:]
+            if product not in self._pending_market_trades:
+                self._pending_market_trades[product] = []
+            trade = TradePrint(
+                timestamp=event.timestamp,
+                buyer=event.data.get("buyer", ""),
+                seller=event.data.get("seller", ""),
+                symbol=product,
+                currency=event.data.get("currency", "SEASHELLS"),
+                price=event.data.get("price", 0.0),
+                quantity=event.data.get("quantity", 0),
+                aggressor_side=event.data.get("aggressor_side"),
+            )
+            self._pending_market_trades[product].append(trade)
 
         return result
 
@@ -264,11 +265,22 @@ class ReplayService:
             for p in self._products:
                 self._own_trades[p] = []
 
+            # Apply conversions (Fix #4)
+            if conversions != 0:
+                self._apply_conversions(conversions, trading_state)
+
             # Parse and match orders
             if not isinstance(raw_orders, dict):
                 raw_orders = {}
 
             checked_orders = self._execution_engine.enforce_limits(raw_orders)
+
+            # Wrap pending trades as MarketTrade for matching (Fix #3)
+            ts_market_trades: dict[str, list[MarketTrade]] = {}
+            for product, trades in self._pending_market_trades.items():
+                ts_market_trades[product] = [
+                    MarketTrade.from_trade_print(t) for t in trades
+                ]
 
             orders_submitted = []
             for product, orders in checked_orders.items():
@@ -298,24 +310,37 @@ class ReplayService:
                 for level in book.asks:
                     sell_depth[int(level.price)] = -level.volume
 
-                # Wrap recent trades as MarketTrade
-                recent_trades = [
-                    MarketTrade.from_trade_print(t)
-                    for t in self._market_trades.get(product, [])
-                ]
-
                 fills = self._execution_engine.match_orders(
                     product=product,
                     orders=orders,
                     buy_orders=buy_depth,
                     sell_orders=sell_depth,
-                    market_trades=recent_trades,
+                    market_trades=ts_market_trades.get(product, []),
                     timestamp=timestamp,
                 )
 
                 for fill in fills:
                     fd = self._process_fill(fill, timestamp)
                     step_fills.append(fd)
+
+            # Compute leftover market trades for next strategy call (Fix #3)
+            for product, mts in ts_market_trades.items():
+                self._market_trades[product] = [
+                    TradePrint(
+                        timestamp=mt.timestamp,
+                        buyer=mt.buyer,
+                        seller=mt.seller,
+                        symbol=mt.symbol,
+                        price=mt.price,
+                        quantity=mt.remaining_quantity,
+                    )
+                    for mt in mts
+                    if mt.remaining_quantity > 0
+                ]
+
+            # Clear pending trades buffer
+            for p in self._products:
+                self._pending_market_trades[p] = []
 
             pnl = self._compute_strategy_pnl(timestamp)
 
@@ -337,6 +362,47 @@ class ReplayService:
                 "pnl": self._compute_strategy_pnl(event.timestamp),
                 "total_fills": len(self._strategy_fills),
             }
+
+    def _apply_conversions(self, conversions: int, state: Any) -> None:
+        """Apply conversions for products with ConversionObservation data."""
+        observations = getattr(state, "observations", None)
+        if observations is None:
+            return
+
+        conv_obs_map = getattr(observations, "conversionObservations", {})
+        if not conv_obs_map:
+            return
+
+        for product, conv_obs in conv_obs_map.items():
+            if not hasattr(conv_obs, "askPrice"):
+                continue
+
+            if conversions > 0:
+                cost_per_unit = (
+                    conv_obs.askPrice + conv_obs.transportFees + conv_obs.importTariff
+                )
+                self._profit_loss[product] = (
+                    self._profit_loss.get(product, 0.0) - cost_per_unit * conversions
+                )
+                self._positions[product] = (
+                    self._positions.get(product, 0) + conversions
+                )
+            elif conversions < 0:
+                revenue_per_unit = (
+                    conv_obs.bidPrice - conv_obs.transportFees - conv_obs.exportTariff
+                )
+                self._profit_loss[product] = (
+                    self._profit_loss.get(product, 0.0)
+                    + revenue_per_unit * abs(conversions)
+                )
+                self._positions[product] = (
+                    self._positions.get(product, 0) + conversions
+                )
+
+            if self._execution_engine:
+                self._execution_engine.update_position(
+                    product, self._positions[product]
+                )
 
     def _process_fill(self, fill, timestamp: int) -> dict:
         """Process a fill: update positions and cash-flow PnL."""

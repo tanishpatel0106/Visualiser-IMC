@@ -11,6 +11,7 @@ with a ``run`` method, matching the Prosperity competition interface.
 import ast
 import signal
 import sys
+import threading
 import traceback
 import types
 from typing import Any, Optional
@@ -228,9 +229,32 @@ class StrategySandbox:
         """
         timeout = timeout or self._default_timeout
 
-        try:
-            result = strategy.run(state)
+        # Run strategy.run(state) on a daemon thread so we can enforce
+        # a wall-clock timeout.  If the thread exceeds the limit the
+        # backtest tick gets empty orders instead of hanging forever.
+        result_slot: list[Any] = [None]
+        error_slot: list[BaseException | None] = [None]
 
+        def _target() -> None:
+            try:
+                result_slot[0] = strategy.run(state)
+            except BaseException as exc:
+                error_slot[0] = exc
+
+        worker = threading.Thread(target=_target, daemon=True)
+        worker.start()
+        worker.join(timeout=timeout)
+
+        if worker.is_alive():
+            # Strategy is still running — treat as timeout
+            return {}, 0, f"ERROR: Strategy execution timed out after {timeout}s"
+
+        if error_slot[0] is not None:
+            return {}, 0, f"ERROR: Strategy raised an exception:\n{error_slot[0]}"
+
+        result = result_slot[0]
+
+        try:
             # The Prosperity interface returns:
             #   (orders_dict, conversions_int, traderData_str)
             if isinstance(result, tuple):
@@ -335,12 +359,16 @@ class StrategySandbox:
                 pass
 
         # Inject the Order class so strategies can create orders without importing
-        from app.engines.sandbox.adapter import Order, OrderDepth, Trade, Listing, TradingState
+        from app.engines.sandbox.adapter import (
+            ConversionObservation, Order, OrderDepth, Trade, Listing, Observation, TradingState,
+        )
         restricted_globals["Order"] = Order
         restricted_globals["OrderDepth"] = OrderDepth
         restricted_globals["Trade"] = Trade
         restricted_globals["Listing"] = Listing
         restricted_globals["TradingState"] = TradingState
+        restricted_globals["Observation"] = Observation
+        restricted_globals["ConversionObservation"] = ConversionObservation
 
         return restricted_globals
 

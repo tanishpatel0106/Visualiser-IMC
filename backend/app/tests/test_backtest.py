@@ -397,3 +397,217 @@ class TestBacktestErrorHandling:
 
         run = engine.run(events, _CrashingTrader())
         assert run.status in ("completed", "failed")
+
+
+# ======================================================================
+# Fix #3: Per-tick market trades (not rolling buffer)
+# ======================================================================
+
+class _CaptureMarketTradesTrader:
+    """Captures state.market_trades on each call for assertion."""
+    def __init__(self):
+        self.seen_market_trades: list[dict[str, int]] = []
+
+    def run(self, state):
+        snap = {}
+        for product, trades in state.market_trades.items():
+            snap[product] = len(trades)
+        self.seen_market_trades.append(snap)
+        return {}, 0, ""
+
+
+class TestPerTickMarketTrades:
+    def test_first_tick_sees_no_market_trades(self):
+        """On the very first timestamp, state.market_trades should be empty."""
+        config = BacktestConfig(
+            strategy_id="capture",
+            products=["X"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"X": 20},
+        )
+        engine = BacktestEngine(config)
+        trader = _CaptureMarketTradesTrader()
+
+        events = [
+            _make_trade_event(100, product="X", price=100.0, quantity=5),
+            _make_book_event(100),
+        ]
+        engine.run(events, trader)
+
+        # Strategy at t=100 sees previous tick's leftovers (none on first tick)
+        assert trader.seen_market_trades[0].get("X", 0) == 0
+
+    def test_leftovers_visible_on_next_tick(self):
+        """Unconsumed market trades from tick N appear as market_trades at tick N+1."""
+        config = BacktestConfig(
+            strategy_id="capture",
+            products=["X"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"X": 20},
+        )
+        engine = BacktestEngine(config)
+        trader = _CaptureMarketTradesTrader()
+
+        events = [
+            # Tick 100: a trade occurs, but strategy places no orders so trade is unconsumed
+            _make_trade_event(100, product="X", price=100.0, quantity=5),
+            _make_book_event(100),
+            # Tick 200: no new trades
+            _make_book_event(200),
+        ]
+        engine.run(events, trader)
+
+        # Tick 100: no leftovers from previous tick (first tick)
+        assert trader.seen_market_trades[0].get("X", 0) == 0
+        # Tick 200: sees leftover from tick 100 (5 units unconsumed)
+        assert trader.seen_market_trades[1].get("X", 0) == 1  # 1 trade with quantity 5
+
+    def test_consumed_trades_not_visible_next_tick(self):
+        """If a market trade is fully consumed by matching, it shouldn't appear next tick."""
+        config = BacktestConfig(
+            strategy_id="capture_after_buy",
+            products=["X"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"X": 20},
+        )
+
+        class _BuyThenCapture:
+            """Buy on tick 1, capture market trades on tick 2."""
+            def __init__(self):
+                self._tick = 0
+                self.seen_market_trades: list[dict[str, int]] = []
+
+            def run(self, state):
+                from app.engines.sandbox.adapter import Order
+                self._tick += 1
+                snap = {p: len(t) for p, t in state.market_trades.items()}
+                self.seen_market_trades.append(snap)
+
+                orders = {}
+                if self._tick == 1:
+                    # Buy 5 at 100 — should consume the market trade (qty 5 at 100)
+                    for product in state.order_depths:
+                        orders[product] = [Order(product, 100, 5)]
+                return orders, 0, ""
+
+        engine = BacktestEngine(config)
+        trader = _BuyThenCapture()
+
+        events = [
+            _make_trade_event(100, product="X", price=100.0, quantity=5),
+            _make_book_event(100, bid=99, ask=101),
+            _make_book_event(200, bid=99, ask=101),
+        ]
+        engine.run(events, trader)
+
+        # Tick 200: trade at tick 100 was consumed by buy order, so no leftovers
+        assert trader.seen_market_trades[1].get("X", 0) == 0
+
+
+# ======================================================================
+# Fix #4: Conversions affect position and cash
+# ======================================================================
+
+class TestConversions:
+    def test_positive_conversion_increases_position(self):
+        """conversions > 0 should increase position and cost askPrice + fees."""
+        from app.engines.sandbox.adapter import ConversionObservation, Observation
+
+        config = BacktestConfig(
+            strategy_id="converter",
+            products=["ORCHIDS"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"ORCHIDS": 100},
+        )
+
+        class _ConvertTrader:
+            def __init__(self):
+                self._called = False
+
+            def run(self, state):
+                if not self._called:
+                    self._called = True
+                    # Set up conversion observations on the state
+                    state.observations.conversionObservations["ORCHIDS"] = (
+                        ConversionObservation(
+                            bidPrice=1000.0,
+                            askPrice=1005.0,
+                            transportFees=2.0,
+                            exportTariff=1.0,
+                            importTariff=1.5,
+                        )
+                    )
+                    return {}, 3, ""  # 3 conversions (import)
+                return {}, 0, ""
+
+        engine = BacktestEngine(config)
+        trader = _ConvertTrader()
+        events = [_make_book_event(100, product="ORCHIDS", bid=999, ask=1001)]
+        engine.run(events, trader)
+
+        # Position should be +3
+        pnl = engine.get_pnl_history()[-1]
+        assert pnl.inventory.get("ORCHIDS", 0) == 3
+
+        # Cash cost = (1005 + 2 + 1.5) * 3 = 1008.5 * 3 = 3025.5
+        # Total PnL = -3025.5 + 3 * mid_price(1000) = -3025.5 + 3000 = -25.5
+        assert pnl.cash == pytest.approx(-3025.5)
+
+    def test_negative_conversion_decreases_position(self):
+        """conversions < 0 should decrease position and earn bidPrice - fees."""
+        from app.engines.sandbox.adapter import ConversionObservation
+
+        config = BacktestConfig(
+            strategy_id="exporter",
+            products=["ORCHIDS"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"ORCHIDS": 100},
+        )
+
+        class _ExportTrader:
+            def __init__(self):
+                self._called = False
+
+            def run(self, state):
+                if not self._called:
+                    self._called = True
+                    state.observations.conversionObservations["ORCHIDS"] = (
+                        ConversionObservation(
+                            bidPrice=1000.0,
+                            askPrice=1005.0,
+                            transportFees=2.0,
+                            exportTariff=1.0,
+                            importTariff=1.5,
+                        )
+                    )
+                    return {}, -2, ""  # -2 conversions (export)
+                return {}, 0, ""
+
+        engine = BacktestEngine(config)
+        trader = _ExportTrader()
+        events = [_make_book_event(100, product="ORCHIDS", bid=999, ask=1001)]
+        engine.run(events, trader)
+
+        pnl = engine.get_pnl_history()[-1]
+        # Position should be -2
+        assert pnl.inventory.get("ORCHIDS", 0) == -2
+
+        # Revenue per unit = 1000 - 2 - 1 = 997
+        # Cash = 997 * 2 = 1994
+        assert pnl.cash == pytest.approx(1994.0)
+
+    def test_zero_conversions_noop(self):
+        """conversions == 0 should not change anything."""
+        config = BacktestConfig(
+            strategy_id="noop",
+            products=["X"],
+            trade_matching=TradeMatchingMode.ALL,
+            position_limits={"X": 20},
+        )
+        engine = BacktestEngine(config)
+        events = [_make_book_event(100)]
+        engine.run(events, _NoOpTrader())
+
+        pnl = engine.get_pnl_history()[-1]
+        assert pnl.cash == 0.0
+        assert pnl.inventory.get("X", 0) == 0

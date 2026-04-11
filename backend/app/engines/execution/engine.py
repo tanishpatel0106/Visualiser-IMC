@@ -32,18 +32,18 @@ from app.models.trading import FillEvent, StrategyOrder
 
 
 # ------------------------------------------------------------------
-# MarketTrade wrapper – tracks consumed buy/sell capacity
+# MarketTrade wrapper – tracks consumed capacity
 # ------------------------------------------------------------------
 
 @dataclass
 class MarketTrade:
-    """Wraps a raw TradePrint with mutable buy/sell capacity.
+    """Wraps a raw TradePrint with a single mutable capacity pool.
 
-    Both ``buy_quantity`` and ``sell_quantity`` start at the full trade
-    quantity.  When a strategy BUY order matches, it consumes
-    ``sell_quantity``; when a SELL order matches, it consumes
-    ``buy_quantity``.  This prevents the same trade from being
-    double-counted across multiple strategy orders.
+    ``remaining_quantity`` starts at the full trade quantity and is
+    consumed by **any** strategy order that matches against this trade,
+    regardless of whether the strategy order is a buy or a sell.  This
+    prevents the same market-trade volume from being double-counted
+    (e.g. filling both a buy *and* a sell for the full printed size).
     """
 
     symbol: str
@@ -52,8 +52,7 @@ class MarketTrade:
     buyer: str = ""
     seller: str = ""
     timestamp: int = 0
-    buy_quantity: int = 0
-    sell_quantity: int = 0
+    remaining_quantity: int = 0
 
     @classmethod
     def from_trade_print(cls, tp: TradePrint) -> "MarketTrade":
@@ -64,8 +63,7 @@ class MarketTrade:
             buyer=tp.buyer,
             seller=tp.seller,
             timestamp=tp.timestamp,
-            buy_quantity=tp.quantity,
-            sell_quantity=tp.quantity,
+            remaining_quantity=tp.quantity,
         )
 
 
@@ -294,7 +292,7 @@ class ExecutionEngine:
             for mt in market_trades:
                 if remaining <= 0:
                     break
-                if mt.sell_quantity <= 0:
+                if mt.remaining_quantity <= 0:
                     continue
                 if mt.price > order.price:
                     continue
@@ -305,7 +303,7 @@ class ExecutionEngine:
                 if max_buy <= 0:
                     break
 
-                fill_qty = min(remaining, mt.sell_quantity, max_buy)
+                fill_qty = min(remaining, mt.remaining_quantity, max_buy)
                 if fill_qty <= 0:
                     continue
 
@@ -321,7 +319,7 @@ class ExecutionEngine:
 
                 position += fill_qty
                 remaining -= fill_qty
-                mt.sell_quantity -= fill_qty
+                mt.remaining_quantity -= fill_qty
 
         # Update tracked position
         self._positions[product] = position
@@ -396,7 +394,7 @@ class ExecutionEngine:
             for mt in market_trades:
                 if remaining <= 0:
                     break
-                if mt.buy_quantity <= 0:
+                if mt.remaining_quantity <= 0:
                     continue
                 if mt.price < sell_price:
                     continue
@@ -407,7 +405,7 @@ class ExecutionEngine:
                 if max_sell <= 0:
                     break
 
-                fill_qty = min(remaining, mt.buy_quantity, max_sell)
+                fill_qty = min(remaining, mt.remaining_quantity, max_sell)
                 if fill_qty <= 0:
                     continue
 
@@ -423,7 +421,7 @@ class ExecutionEngine:
 
                 position -= fill_qty
                 remaining -= fill_qty
-                mt.buy_quantity -= fill_qty
+                mt.remaining_quantity -= fill_qty
 
         # Update tracked position
         self._positions[product] = position

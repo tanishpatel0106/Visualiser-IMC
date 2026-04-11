@@ -77,7 +77,10 @@ class BacktestEngine:
         self._debug_frames: list[DebugFrame] = []
         self._all_orders: list[StrategyOrder] = []
 
-        # Trade buffers for strategy visibility
+        # Trade buffers for strategy visibility (Prosperity semantics):
+        # • own_trades   – fills from the PREVIOUS tick (cleared after strategy sees them)
+        # • market_trades – LEFTOVER (unconsumed) market trades from the previous
+        #                   tick's matching phase.  NOT a rolling buffer.
         self._own_trades: dict[str, list[TradePrint]] = {}
         self._market_trades: dict[str, list[TradePrint]] = {}
 
@@ -208,8 +211,10 @@ class BacktestEngine:
                 self._market_trades.setdefault(product, [])
 
         # ── Step 2: Collect market trades for this timestamp ──
+        # These MarketTrade wrappers are used for MATCHING only.
+        # The strategy sees previous tick's leftovers (self._market_trades),
+        # not this tick's raw trades.
         ts_market_trades: dict[str, list[MarketTrade]] = defaultdict(list)
-        ts_raw_trades: dict[str, list[TradePrint]] = defaultdict(list)
 
         for event in trade_events:
             data = event.data
@@ -223,22 +228,14 @@ class BacktestEngine:
                 quantity=data.get("quantity", 0),
                 aggressor_side=data.get("aggressor_side"),
             )
-            ts_raw_trades[product].append(trade)
             ts_market_trades[product].append(MarketTrade.from_trade_print(trade))
-
-        # Update market trade buffer for strategy visibility
-        for product in products:
-            if product in ts_raw_trades:
-                self._market_trades[product].extend(ts_raw_trades[product])
-                # Keep last 50 per product
-                if len(self._market_trades[product]) > 50:
-                    self._market_trades[product] = self._market_trades[product][-50:]
 
         # Skip strategy call if no snapshots at this timestamp
         if not snapshot_events:
             return
 
         # ── Step 3: Build Prosperity TradingState ──
+        # state.market_trades = previous tick's leftover trades (already in self._market_trades)
         books = {p: self._book_engine.get_current_book(p) for p in products}
 
         # Update mid prices for mark-to-market
@@ -268,13 +265,17 @@ class BacktestEngine:
         for p in products:
             self._own_trades[p] = []
 
-        # ── Step 5: Enforce aggregate position limits ──
+        # ── Step 5: Apply conversions ──
+        if conversions != 0:
+            self._apply_conversions(conversions, state, products, timestamp)
+
+        # ── Step 6: Enforce aggregate position limits ──
         if not isinstance(raw_orders, dict):
             raw_orders = {}
 
         checked_orders = self._execution_engine.enforce_limits(raw_orders)
 
-        # ── Step 6: Match orders product-by-product ──
+        # ── Step 7: Match orders product-by-product ──
         tick_fills: list[FillEvent] = []
         tick_orders: list[StrategyOrder] = []
 
@@ -321,8 +322,28 @@ class BacktestEngine:
 
         self._all_orders.extend(tick_orders)
 
-        # ── Step 7: Process fills – update PnL and positions ──
+        # ── Step 8: Process fills – update PnL and positions ──
         self._process_fills(tick_fills, timestamp)
+
+        # ── Step 9: Compute leftover market trades for next tick ──
+        # After matching, any MarketTrade with remaining_quantity > 0
+        # becomes state.market_trades for the next tick.
+        for product, mts in ts_market_trades.items():
+            leftovers = [
+                TradePrint(
+                    timestamp=mt.timestamp,
+                    buyer=mt.buyer,
+                    seller=mt.seller,
+                    symbol=mt.symbol,
+                    price=mt.price,
+                    quantity=mt.remaining_quantity,
+                )
+                for mt in mts
+                if mt.remaining_quantity > 0
+            ]
+            self._market_trades[product] = leftovers
+        # Products with no trades this tick keep their existing leftovers
+        # (matches reference: prepare_state doesn't clear market_trades)
 
         # ── Step 8: Record PnL snapshot (mark-to-market) ──
         pnl_state = self._build_pnl_state(timestamp)
@@ -342,6 +363,71 @@ class BacktestEngine:
             tick_orders, tick_fills, raw_orders,
         )
         self._debug_frames.append(debug_frame)
+
+    # ------------------------------------------------------------------
+    # Conversions
+    # ------------------------------------------------------------------
+
+    def _apply_conversions(
+        self,
+        conversions: int,
+        state: Any,
+        products: list[str],
+        timestamp: int,
+    ) -> None:
+        """Apply conversions for products with ConversionObservation data.
+
+        In Prosperity, the strategy returns a single integer ``conversions``.
+        For each product that has a ConversionObservation in the state's
+        observations, the conversion adjusts position and cash:
+
+        * conversions > 0 (import/buy from south):
+            cost = (askPrice + transportFees + importTariff) * conversions
+            position += conversions
+        * conversions < 0 (export/sell to south):
+            revenue = (bidPrice − transportFees − exportTariff) * |conversions|
+            position += conversions  (negative, so position decreases)
+
+        If no product has ConversionObservation data, this is a no-op.
+        """
+        observations = getattr(state, "observations", None)
+        if observations is None:
+            return
+
+        conv_obs_map = getattr(observations, "conversionObservations", {})
+        if not conv_obs_map:
+            return
+
+        for product, conv_obs in conv_obs_map.items():
+            if not hasattr(conv_obs, "askPrice"):
+                continue
+
+            if conversions > 0:
+                cost_per_unit = (
+                    conv_obs.askPrice + conv_obs.transportFees + conv_obs.importTariff
+                )
+                self._profit_loss[product] = (
+                    self._profit_loss.get(product, 0.0) - cost_per_unit * conversions
+                )
+                self._positions[product] = (
+                    self._positions.get(product, 0) + conversions
+                )
+            elif conversions < 0:
+                revenue_per_unit = (
+                    conv_obs.bidPrice - conv_obs.transportFees - conv_obs.exportTariff
+                )
+                self._profit_loss[product] = (
+                    self._profit_loss.get(product, 0.0)
+                    + revenue_per_unit * abs(conversions)
+                )
+                self._positions[product] = (
+                    self._positions.get(product, 0) + conversions
+                )
+
+            # Sync position with execution engine
+            self._execution_engine.update_position(
+                product, self._positions[product]
+            )
 
     # ------------------------------------------------------------------
     # Fill processing – cash-flow PnL
