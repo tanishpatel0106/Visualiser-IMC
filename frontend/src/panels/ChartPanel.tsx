@@ -472,7 +472,7 @@ export function ChartPanel() {
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const indicatorSeriesRefs = useRef<ISeriesApi<'Line'>[]>([]);
 
-  const { selectedProduct, selectedDay } = useDatasetStore();
+  const { selectedProduct, selectedDay, selectedWindow } = useDatasetStore();
   const { ohlcv, fills: backtestFills, setOhlcv } = useBacktestStore();
   const { isPlaying, currentTimestamp, replayFills } = useReplayStore();
 
@@ -558,11 +558,14 @@ export function ChartPanel() {
   // Load OHLCV data when product changes
   useEffect(() => {
     if (!selectedProduct) return;
+    let active = true;
+    setOhlcv([]);
     const interval = chartMode === 'line' || chartMode === 'step' ? 500 : 5000;
-    api.fetchOHLCV(selectedProduct, interval)
-      .then(setOhlcv)
+    api.fetchOHLCV(selectedProduct, interval, selectedDay)
+      .then((bars) => { if (active) setOhlcv(bars); })
       .catch(console.error);
-  }, [selectedProduct, selectedDay, chartMode, setOhlcv]);
+    return () => { active = false; };
+  }, [selectedProduct, selectedDay, selectedWindow, chartMode, setOhlcv]);
 
   // Update series when visible data or mode changes
   useEffect(() => {

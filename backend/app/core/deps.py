@@ -4,6 +4,7 @@ import os
 from typing import Optional
 
 from fastapi import HTTPException
+from pathlib import Path
 
 from app.core.config import settings
 from app.engines.replay.engine import ReplayEngine
@@ -21,9 +22,17 @@ _strategy_registry: Optional[StrategyRegistry] = None
 _storage_service: Optional[StorageService] = None
 
 
-def get_dataset_service() -> DatasetService:
+def get_dataset_service(window: int = 0) -> DatasetService:
     """Return the global DatasetService singleton."""
     global _dataset_service
+    if settings.dataset_manifest and Path(settings.dataset_manifest).is_file():
+        from app.services.nvda_dataset import nvda_dataset
+        try:
+            return nvda_dataset.load(window)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="NVDA dataset storage is unavailable.") from exc
     if os.environ.get("BLOB_READ_WRITE_TOKEN"):
         from app.services.shared_dataset import shared_dataset
         try:

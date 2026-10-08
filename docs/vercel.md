@@ -1,90 +1,95 @@
-# Vercel services deployment
+# Vercel deployment: NVDA day 0
 
-Import the repository with the Vercel project root set to the repository root.
-`vercel.json` builds `backend` (FastAPI, `app/main.py`) and `frontend` (Vite)
-independently. `/api/*` is routed to the backend without removing `/api`;
-all other paths go to the frontend. The backend build copies the four CSV files
-already committed in `sample_data/` into its service directory. These repository
-files are the initial dataset, not generated or downloaded replacement data.
-
-The static frontend makes requests from the browser to same-origin `/api`.
-There are no server-to-server calls and consequently no service bindings.
-Do not set a binding URL as `VITE_API_BASE_URL`: service bindings are only
-available in runtime functions and cannot be read by a static browser build.
+The confirmed services are `backend` (public `/api/*`) and `frontend` (public
+catch-all `/`). Import the repository with the project root at the repository
+root. The browser calls same-origin `/api`; there are no runtime service
+bindings because there are no server-to-server calls between these services.
 Leave `VITE_API_BASE_URL` and `VITE_WS_BASE_URL` unset for shared-domain routing.
 
-For local service integration, run `vercel dev` from the repository root after
-linking the project. Check `/api/health`, `/api/datasets` (loaded sample data),
-and `/api/strategies` as well as the frontend page. This requires Vercel account
-access and a project that supports services.
+## Bundled data and time ranges
 
-## Shared dataset updates
+`data/nvda/manifest.json` and its gzip chunks contain only NVDA from the real
+uploaded day-0 files. All 4,038,507 price snapshots and 318,515 trade prints are
+preserved without downsampling, including duplicate-timestamp price updates.
+The entire prepared dataset is approximately 15 MB compressed. The original
+multi-stock Git LFS pointers are no longer part of the deployment.
 
-1. Connect a **private Vercel Blob store** to the Vercel project and enable its
-   `BLOB_READ_WRITE_TOKEN` environment variable for the backend's deployment.
-2. Set a strong, private `IMC_DATA_ADMIN_TOKEN` in Vercel's server environment.
-   Do not expose either credential through a `VITE_` variable or commit it.
-3. Redeploy to apply the variables. Before any upload, the backend serves the
-   repository CSVs. With Blob configured, each dataset request checks for the
-   shared replacement using a conditional uncached read.
+The backend build copies `data/nvda` into its service. Startup loads one range,
+not the full day. The backend retains at most two ranges in memory, checks
+SHA-256 before decompression, and verifies loaded row counts against the
+manifest. `/api/datasets` returns NVDA, day 0, totals, and the available ranges.
 
-Upload a **complete replacement dataset** with multipart `files` fields to
-`POST /api/datasets/upload`, authenticated with
-`Authorization: Bearer <IMC_DATA_ADMIN_TOKEN>`. Filenames must follow
-`prices_round_N_day_D.csv` or `trades_round_N_day_D.csv`. For example, using
-credentials supplied securely in your local shell:
+Use the frontend **RANGE** selector to choose among all 404 time ranges.
+Charts, replay, and backtests operate on the selected range, not the full day.
+Changing ranges clears the replay state and reloads the chart. API data/replay/
+backtest requests use `?window=N`, where N is the range's manifest ID; omitting
+it selects range 0. The range boundaries vary because they contain about 10,000
+price rows each; records sharing a timestamp stay together. Timestamps retain
+the original milliseconds from the start of the trading session.
+
+The bundled data works without Blob credentials. If a private Blob store is
+connected but has no active NVDA manifest, the backend also uses the bundle.
+Previous uploads stored at `imc/active-dataset.json` do not override this NVDA
+bundle; the new active path is `imc/nvda/active-manifest.json`.
+
+## Durable backend replacements
+
+Connect a **private Vercel Blob store** to the Vercel project and configure
+`BLOB_READ_WRITE_TOKEN` in the backend's runtime environment. Set a strong
+`IMC_DATA_ADMIN_TOKEN` securely in Vercel. Redeploy to apply the variables.
+Never commit credentials or expose them through `VITE_` variables.
+
+For small replacements, send multipart `files` to `POST /api/datasets/upload`
+with `Authorization: Bearer <IMC_DATA_ADMIN_TOKEN>`. Include
+`prices_round_0_day_0.csv` and optionally `trades_round_0_day_0.csv`. The backend
+validates the CSVs, extracts only NVDA day 0, prepares bounded gzip ranges,
+uploads immutable chunks, then publishes the active manifest after all uploads
+succeed. This is a complete replacement, shared across instances and restarts.
+Only NVDA is kept if the input contains additional stocks. Requests are limited
+to 32 files and 3 MiB combined UTF-8 contents; this is the small-upload option,
+not the ingestion path for the original large files.
+
+For large datasets, prepare and publish offline using the included scripts:
 
 ```bash
-curl --fail-with-body "$DEPLOYMENT_URL/api/datasets/upload" \
-  -H "Authorization: Bearer $IMC_DATA_ADMIN_TOKEN" \
-  -F 'files=@sample_data/prices_round_0_day_-1.csv' \
-  -F 'files=@sample_data/prices_round_0_day_-2.csv' \
-  -F 'files=@sample_data/trades_round_0_day_-1.csv' \
-  -F 'files=@sample_data/trades_round_0_day_-2.csv'
+python scripts/prepare_nvda.py --prices /path/to/real/prices.csv \
+  --trades /path/to/real/trades.csv --output /path/to/prepared-nvda
+# With BLOB_READ_WRITE_TOKEN supplied securely in your shell:
+python scripts/publish_nvda.py /path/to/prepared-nvda
 ```
 
-The backend validates all files before storing a single private JSON object at
-`imc/active-dataset.json`. This gives readers a complete replacement, persists
-across restarts and deployments using the same Blob store, and is shared by all
-users. Existing process snapshots refresh on their next dataset request. Active
-replays must restart after replacement. Concurrent uploads use the last completed
-write. There is no upload history or rollback archive.
+Preparation requires actual hydrated CSVs and rejects Git LFS pointer files.
+Publishing uses the private store's credential and bypasses the function
+request-body limit. The active manifest is updated only after every chunk
+upload succeeds. Do not publish against a store you do not intend to update.
+Chunk paths contain a dataset hash; existing readers keep using their current
+version until the new manifest is published. Concurrent publications use the
+last completed manifest write. Old chunk versions remain in Blob for safe
+reads; there is no automatic storage cleanup or upload history UI.
 
-Uploads accept up to 32 files and 3 MiB of combined UTF-8 CSV contents, below
-Vercel's request-body limit. For larger collections, use a future direct-to-Blob
-upload flow. The initial repository dataset is bundled at build time and does
-not pass through this upload limit.
+Admin-authenticated `POST /api/datasets/reset` deletes only the active NVDA
+manifest and restores the bundled NVDA data. Existing readers check for updates
+on the next dataset request. Refresh the frontend after replacement. Restart
+active replays after changing the data. Upload/reset endpoints reject mutations
+when credentials are absent. Local-directory `/api/datasets/load` is disabled
+for the chunked dataset because it cannot publish a shared durable change.
 
-Admin-authenticated `POST /api/datasets/reset` removes the shared replacement
-and restores the bundled repository CSVs for all users. Public read endpoints
-remain accessible; uploads and resets fail closed when credentials are absent.
-The local-directory `/api/datasets/load` endpoint is disabled on Vercel and when
-Blob storage is configured, since it cannot publish a shared durable update.
-Temporary local parsing happens in `/tmp`; uploaded data lives durably in Blob.
-If Blob becomes unavailable, reads return 503 rather than silently reverting
-to an old dataset. Refresh the frontend to retrieve the updated products/days.
+## Validation and runtime limits
 
-For live verification, upload a changed CSV, read it from a fresh backend
-instance, and then call reset and confirm the repository products return.
-Mocked tests cover these operations without making live Blob writes. A real
-Blob store and credentials are required for the live deployment check.
+Run `vercel dev` from the repository root with an authenticated linked Vercel
+project for services integration. Check `/api/health`, `/api/datasets`, and
+`/api/ohlcv?product=NVDA&day=0&window=0`; choose a later range and verify it
+returns different timestamps. The backend test suite covers preparation,
+range-scoped API requests, checksums, cache bounds, and mocked Blob publication.
+Live Blob verification requires usable store credentials.
 
-## Runtime limitations
+Dataset display is prepared for Vercel, but these separate limits remain:
 
-This configuration does not make the full trading terminal production-ready:
-
-- Vercel Functions cannot host the backend's WebSocket server. Live replay at
-  `/api/ws/replay` requires a persistent ASGI host or a separate realtime service.
-- Replay state and strategy registry changes live in process-local singletons;
-  requests across instances or cold starts do not share them.
-- On Vercel, SQLite defaults to `/tmp/imc/storage/app.db`, which is writable but
-  ephemeral and isolated per instance. Saved runs and uploaded strategies are
-  not durable. `IMC_STORAGE_PATH` still overrides the default; use a persistent
-  database implementation for production rather than a deployment-directory file.
-- Long-running backtests must fit the plan's function duration and resource limits.
-
-For the complete replay and persistence workflow, keep the backend on a persistent
-host or plan a separate change for shared state, durable storage, and realtime
-transport. The confirmed services are `backend` (public `/api/*`) and `frontend`
-(public catch-all), with no service-to-service bindings. Blob is external
-storage, not an additional Vercel service in `vercel.json`.
+- Vercel Functions cannot host the existing `/api/ws/replay` WebSocket server.
+- Replay state is process-local and does not survive cold starts or move across
+  instances. Shared replay needs a persistent host or shared-state redesign.
+- SQLite run/strategy storage defaults to writable but ephemeral `/tmp` on Vercel.
+  Blob dataset persistence does not make those results durable.
+- Backtests are limited to the selected range and must fit function resource
+  and duration limits. Full-day backtesting belongs in an offline workflow or
+  a separate worker that streams ranges.

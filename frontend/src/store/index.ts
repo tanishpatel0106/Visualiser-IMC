@@ -29,6 +29,8 @@ interface DatasetStoreState {
   days: number[];
   selectedProduct: Product | null;
   selectedDay: number | null;
+  selectedWindow: number;
+  setSelectedWindow: (window: number) => void;
   setDatasetInfo: (info: DatasetInfo) => void;
   setProducts: (products: Product[]) => void;
   setDays: (days: number[]) => void;
@@ -42,6 +44,8 @@ export const useDatasetStore = create<DatasetStoreState>((set) => ({
   days: [],
   selectedProduct: null,
   selectedDay: null,
+  selectedWindow: 0,
+  setSelectedWindow: (selectedWindow) => set({ selectedWindow }),
   setDatasetInfo: (info) =>
     set((prev) => {
       const products = info.products ?? [];
@@ -63,6 +67,8 @@ export const useDatasetStore = create<DatasetStoreState>((set) => ({
         days,
         selectedProduct,
         selectedDay,
+        selectedWindow: info.windows?.some((w) => w.id === prev.selectedWindow)
+          ? prev.selectedWindow : 0,
       };
     }),
   setProducts: (products) => set({ products }),

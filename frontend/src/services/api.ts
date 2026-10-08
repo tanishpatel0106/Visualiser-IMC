@@ -13,6 +13,7 @@ import type {
   ReplaySession,
   ReplayStepResponse,
 } from '@/types';
+import { useDatasetStore } from '@/store';
 
 const CONFIGURED_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, '') || '/api';
 let activeBase: string | null = null;
@@ -33,10 +34,13 @@ export function getActiveApiBase(): string {
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let lastErr: unknown = null;
+  // Metadata lists all ranges; data, replay, and backtests use the selected range.
+  const scopedPath = path === '/datasets' ? path
+    : `${path}${path.includes('?') ? '&' : '?'}window=${useDatasetStore.getState().selectedWindow}`;
 
   for (const base of candidateBases()) {
     try {
-      const res = await fetch(`${base}${path}`, {
+      const res = await fetch(`${base}${scopedPath}`, {
         headers: { 'Content-Type': 'application/json' },
         ...options,
       });
@@ -107,10 +111,12 @@ export async function fetchTrades(
 
 export async function fetchOHLCV(
   product: string,
-  interval?: number
+  interval?: number,
+  day?: number | null,
 ): Promise<OHLCVBar[]> {
   const params = new URLSearchParams({ product });
   if (interval !== undefined) params.set('interval', String(interval));
+  if (day !== undefined && day !== null) params.set('day', String(day));
   const res = await request<{ product: string; interval: number; count: number; bars: OHLCVBar[] }>(`/ohlcv?${params}`);
   return res.bars ?? [];
 }
@@ -273,18 +279,19 @@ export async function compareRuns(runIds: string[]): Promise<{ runs: BacktestRun
 // === WebSocket ===
 
 export function createReplayWebSocket(): WebSocket {
+  const windowQuery = `?window=${useDatasetStore.getState().selectedWindow}`;
   const wsBase = (import.meta.env.VITE_WS_BASE_URL as string | undefined)?.replace(/\/+$/, '');
   if (wsBase) {
-    return new WebSocket(`${wsBase}/ws/replay`);
+    return new WebSocket(`${wsBase}/ws/replay${windowQuery}`);
   }
 
   const base = getActiveApiBase();
   if (base.startsWith('http://') || base.startsWith('https://')) {
     const wsUrl = `${base}/ws/replay`.replace(/^http/, 'ws');
-    return new WebSocket(wsUrl);
+    return new WebSocket(`${wsUrl}${windowQuery}`);
   }
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const host = window.location.host;
-  return new WebSocket(`${protocol}//${host}${base}/ws/replay`);
+  return new WebSocket(`${protocol}//${host}${base}/ws/replay${windowQuery}`);
 }

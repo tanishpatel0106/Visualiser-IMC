@@ -1,8 +1,9 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { useReplayStore } from '@/store';
+import { useDatasetStore, useReplayStore } from '@/store';
 import { createReplayWebSocket } from '@/services/api';
 
 export function useWebSocket() {
+  const selectedWindow = useDatasetStore((state) => state.selectedWindow);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>();
   const updateReplayState = useReplayStore((s) => s.updateReplayState);
@@ -54,7 +55,7 @@ export function useWebSocket() {
       console.error('[WS] Failed to connect:', err);
       reconnectTimer.current = setTimeout(connect, 3000);
     }
-  }, [updateReplayState, updateFromStepResponse]);
+  }, [updateReplayState, updateFromStepResponse, selectedWindow]);
 
   useEffect(() => {
     connect();

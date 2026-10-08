@@ -35,7 +35,10 @@ async def lifespan(app: FastAPI):
 
     # 3. Auto-load sample data if the directory exists
     data_dir = settings.data_directory
-    if os.path.isdir(data_dir):
+    if os.path.isfile(settings.dataset_manifest):
+        ds = get_dataset_service()
+        logger.info("NVDA dataset ready: %d time ranges", len(ds.windows))
+    elif os.path.isdir(data_dir):
         ds = get_dataset_service()
         try:
             summary = (

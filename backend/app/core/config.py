@@ -16,6 +16,11 @@ class Settings(BaseSettings):
         if os.getenv("VERCEL") == "1" else "sample_data"
     )
     storage_path: str = "/tmp/imc/storage/app.db" if os.getenv("VERCEL") == "1" else "storage/app.db"
+    dataset_manifest: str = (
+        str(Path(__file__).resolve().parents[2] / "data/nvda/manifest.json")
+        if os.getenv("VERCEL") == "1"
+        else str(Path(__file__).resolve().parents[3] / "data/nvda/manifest.json")
+    )
     max_replay_speed: float = 100.0
     default_position_limit: int = 20
     strategy_timeout: float = 1.0

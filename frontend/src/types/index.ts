@@ -300,4 +300,9 @@ export interface DatasetInfo {
   products: string[];
   days: number[];
   loaded: boolean;
+  windows?: { id: number; start: number; end: number }[];
+  window_id?: number;
+  source?: string;
+  total_snapshots?: number;
+  total_trades?: number;
 }

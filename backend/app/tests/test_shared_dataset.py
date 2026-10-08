@@ -51,6 +51,7 @@ def blob(monkeypatch, tmp_path):
 
     (tmp_path / NAME).write_text(REPOSITORY)
     monkeypatch.setattr(settings, "data_directory", str(tmp_path))
+    monkeypatch.setattr(settings, "dataset_manifest", "")
     monkeypatch.setattr(module, "BlobClient", FakeBlob)
     monkeypatch.setattr(module, "shared_dataset", module.SharedDataset())
     monkeypatch.setenv("BLOB_READ_WRITE_TOKEN", "test-only-blob-token")

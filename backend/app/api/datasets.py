@@ -2,6 +2,7 @@
 
 import os
 import secrets
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from starlette.concurrency import run_in_threadpool
@@ -9,6 +10,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.core.deps import get_dataset_service
+from app.core.config import settings
 from app.engines.analytics.indicators import TechnicalIndicators
 from app.engines.data.aggregator import DataAggregator
 from app.services.dataset_service import DatasetService
@@ -53,6 +55,9 @@ async def upload_dataset(files: list[UploadFile] = File(...)):
             if remaining < 0:
                 raise HTTPException(status_code=413, detail="Combined CSV contents exceed 3 MiB.")
             contents[file.filename or ""] = raw.decode("utf-8-sig")
+        if settings.dataset_manifest and Path(settings.dataset_manifest).is_file():
+            from app.services.nvda_dataset import nvda_dataset
+            return await run_in_threadpool(nvda_dataset.publish, contents)
         return await run_in_threadpool(shared_dataset.publish, contents)
     except (ValueError, UnicodeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -70,7 +75,11 @@ def reset_dataset():
     """Remove the replacement and restore repository-bundled CSVs for all instances."""
     from app.services.shared_dataset import shared_dataset
     try:
-        shared_dataset.reset()
+        if settings.dataset_manifest and Path(settings.dataset_manifest).is_file():
+            from app.services.nvda_dataset import nvda_dataset
+            nvda_dataset.reset()
+        else:
+            shared_dataset.reset()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Unable to reset the shared dataset.") from exc
     return {"source": "repository", "status": "ok"}
@@ -94,11 +103,16 @@ def list_datasets(ds: DatasetService = Depends(get_dataset_service)):
     """List currently loaded dataset metadata."""
     products = ds.get_products()
     days = ds.get_days()
-    return {
+    result = {
         "products": products,
         "days": days,
         "loaded": len(products) > 0,
     }
+    if hasattr(ds, "windows"):
+        result.update(windows=ds.windows, window_id=ds.window_id,
+                      source=ds.dataset_source, total_snapshots=ds.total_snapshots,
+                      total_trades=ds.total_trades)
+    return result
 
 
 @router.post("/datasets/load")
@@ -107,7 +121,8 @@ def load_dataset(
     ds: DatasetService = Depends(get_dataset_service),
 ):
     """Load a dataset from the given directory."""
-    if os.environ.get("VERCEL") == "1" or os.environ.get("BLOB_READ_WRITE_TOKEN"):
+    if (os.environ.get("VERCEL") == "1" or os.environ.get("BLOB_READ_WRITE_TOKEN")
+            or Path(settings.dataset_manifest).is_file()):
         raise HTTPException(status_code=403, detail="Use the admin-protected /api/datasets/upload endpoint.")
     try:
         summary = ds.load_dataset(req.directory)

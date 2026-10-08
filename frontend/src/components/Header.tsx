@@ -96,7 +96,7 @@ function formatTimestamp(ts: number): string {
 }
 
 export function Header() {
-  const { products, days, selectedProduct, selectedDay, setSelectedProduct, setSelectedDay, datasetInfo } = useDatasetStore();
+  const { products, days, selectedProduct, selectedDay, selectedWindow, setSelectedWindow, setSelectedProduct, setSelectedDay, datasetInfo } = useDatasetStore();
   const { isPlaying, speed, currentTimestamp, currentIndex, totalEvents, pnl, setPlaying, setSpeed } = useReplayStore();
   const { strategies, selectedStrategy, setSelectedStrategy } = useStrategyStore();
   const { activeWorkspace, setActiveWorkspace } = useUIStore();
@@ -232,6 +232,21 @@ export function Header() {
       <div style={styles.divider} />
 
       {/* Strategy selector */}
+      {!!datasetInfo?.windows?.length && <>
+        <span style={styles.label}>RANGE</span>
+        <select className="select select-sm" aria-label="NVDA time range"
+          title="Charts, replay and backtests use this time range"
+          value={selectedWindow}
+          onChange={(e) => {
+            setSelectedWindow(Number(e.target.value));
+            useReplayStore.getState().resetReplay();
+          }} style={{ width: 195 }}>
+          {datasetInfo.windows.map((w) => <option key={w.id} value={w.id}>
+            {formatTimestamp(w.start)} – {formatTimestamp(w.end)}
+          </option>)}
+        </select>
+      </>}
+
       <span style={styles.label}>STRAT</span>
       <select
         className="select select-sm"

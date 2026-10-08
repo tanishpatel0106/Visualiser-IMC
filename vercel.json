@@ -5,7 +5,7 @@
       "root": "backend",
       "framework": "fastapi",
       "entrypoint": "app/main.py",
-      "buildCommand": "mkdir -p sample_data && cp ../sample_data/*.csv sample_data/"
+      "buildCommand": "mkdir -p data/nvda && cp -R ../data/nvda/. data/nvda/"
     },
     "frontend": {
       "root": "frontend",
