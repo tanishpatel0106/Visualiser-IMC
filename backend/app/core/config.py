@@ -1,5 +1,6 @@
 """Application configuration using pydantic-settings."""
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +11,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Global settings for the IMC Prosperity trading terminal backend."""
 
-    data_directory: str = "sample_data"
-    storage_path: str = "storage/app.db"
+    data_directory: str = (
+        str(Path(__file__).resolve().parents[2] / "sample_data")
+        if os.getenv("VERCEL") == "1" else "sample_data"
+    )
+    storage_path: str = "/tmp/imc/storage/app.db" if os.getenv("VERCEL") == "1" else "storage/app.db"
     max_replay_speed: float = 100.0
     default_position_limit: int = 20
     strategy_timeout: float = 1.0

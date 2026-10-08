@@ -22,7 +22,7 @@ def _get_replay_service(
 ) -> ReplayService:
     # Reuse the same ReplayService wrapper across requests by storing it
     # on the engine (lightweight approach; alternatively use a global).
-    if not hasattr(engine, "_service"):
+    if not hasattr(engine, "_service") or engine._service._dataset is not ds:
         engine._service = ReplayService(engine, ds)  # type: ignore[attr-defined]
     return engine._service  # type: ignore[attr-defined]
 

@@ -38,7 +38,11 @@ async def lifespan(app: FastAPI):
     if os.path.isdir(data_dir):
         ds = get_dataset_service()
         try:
-            summary = ds.load_dataset(data_dir)
+            summary = (
+                {"products": ds.get_products(), "days": ds.get_days()}
+                if os.environ.get("BLOB_READ_WRITE_TOKEN")
+                else ds.load_dataset(data_dir)
+            )
             logger.info(
                 "Auto-loaded dataset: %d files, %d products, %d days",
                 summary.get("files", 0),

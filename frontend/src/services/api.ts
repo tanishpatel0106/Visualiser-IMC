@@ -18,7 +18,9 @@ const CONFIGURED_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined
 let activeBase: string | null = null;
 
 function candidateBases(): string[] {
-  const local = ['http://localhost:8000/api', 'http://127.0.0.1:8000/api'];
+  const local = import.meta.env.DEV
+    ? ['http://localhost:8000/api', 'http://127.0.0.1:8000/api']
+    : [];
   const configured = [CONFIGURED_BASE];
   if (typeof window === 'undefined') return [...configured, ...local];
   const sameOrigin = `${window.location.origin}/api`;

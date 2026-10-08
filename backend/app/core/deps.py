@@ -1,6 +1,9 @@
 """Dependency injection for FastAPI endpoints."""
 
+import os
 from typing import Optional
+
+from fastapi import HTTPException
 
 from app.core.config import settings
 from app.engines.replay.engine import ReplayEngine
@@ -21,6 +24,12 @@ _storage_service: Optional[StorageService] = None
 def get_dataset_service() -> DatasetService:
     """Return the global DatasetService singleton."""
     global _dataset_service
+    if os.environ.get("BLOB_READ_WRITE_TOKEN"):
+        from app.services.shared_dataset import shared_dataset
+        try:
+            return shared_dataset.load()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Shared dataset storage is unavailable.") from exc
     if _dataset_service is None:
         _dataset_service = DatasetService()
     return _dataset_service

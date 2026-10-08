@@ -1,6 +1,10 @@
 """Dataset and market data API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import os
+import secrets
+
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional
 
@@ -14,6 +18,62 @@ router = APIRouter()
 
 class LoadRequest(BaseModel):
     directory: str
+
+
+def require_data_admin(authorization: Optional[str] = Header(None)):
+    token = os.environ.get("IMC_DATA_ADMIN_TOKEN")
+    if not token:
+        raise HTTPException(status_code=503, detail="Dataset administration is not configured.")
+    supplied = (authorization or "").removeprefix("Bearer ")
+    if not authorization or not authorization.startswith("Bearer ") or not secrets.compare_digest(
+        supplied.encode(), token.encode()
+    ):
+        raise HTTPException(status_code=401, detail="Invalid dataset admin credentials.")
+
+
+def require_shared_storage():
+    if not os.environ.get("BLOB_READ_WRITE_TOKEN"):
+        raise HTTPException(status_code=503, detail="Connect a private Vercel Blob store first.")
+
+
+@router.post("/datasets/upload", dependencies=[Depends(require_data_admin), Depends(require_shared_storage)])
+async def upload_dataset(files: list[UploadFile] = File(...)):
+    """Replace the shared dataset with a complete, validated CSV collection."""
+    from app.services.shared_dataset import MAX_UPLOAD_BYTES, shared_dataset
+    contents = {}
+    remaining = MAX_UPLOAD_BYTES
+    try:
+        if not 1 <= len(files) <= 32:
+            raise ValueError("Upload between 1 and 32 CSV files.")
+        for file in files:
+            if file.filename in contents:
+                raise ValueError("Duplicate filenames are not allowed.")
+            raw = await file.read(remaining + 1)
+            remaining -= len(raw)
+            if remaining < 0:
+                raise HTTPException(status_code=413, detail="Combined CSV contents exceed 3 MiB.")
+            contents[file.filename or ""] = raw.decode("utf-8-sig")
+        return await run_in_threadpool(shared_dataset.publish, contents)
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Unable to publish the shared dataset.") from exc
+    finally:
+        for file in files:
+            await file.close()
+
+
+@router.post("/datasets/reset", dependencies=[Depends(require_data_admin), Depends(require_shared_storage)])
+def reset_dataset():
+    """Remove the replacement and restore repository-bundled CSVs for all instances."""
+    from app.services.shared_dataset import shared_dataset
+    try:
+        shared_dataset.reset()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Unable to reset the shared dataset.") from exc
+    return {"source": "repository", "status": "ok"}
 
 
 # ------------------------------------------------------------------
@@ -47,6 +107,8 @@ def load_dataset(
     ds: DatasetService = Depends(get_dataset_service),
 ):
     """Load a dataset from the given directory."""
+    if os.environ.get("VERCEL") == "1" or os.environ.get("BLOB_READ_WRITE_TOKEN"):
+        raise HTTPException(status_code=403, detail="Use the admin-protected /api/datasets/upload endpoint.")
     try:
         summary = ds.load_dataset(req.directory)
         return summary
