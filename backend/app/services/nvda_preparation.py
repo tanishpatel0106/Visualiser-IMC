@@ -95,6 +95,8 @@ def prepare(prices, trades, output, max_rows=10000):
                 "total_snapshots": sum(w["prices"]["rows"] for w in windows),
                 "total_trades": sum(w["trades"]["rows"] for w in windows),
                 "source_sha256": {"prices": digest(prices), "trades": digest(trades)}}
+    from app.services.nvda_overview import build_overview
+    build_overview(output, manifest)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps({"windows": len(windows), "snapshots": manifest["total_snapshots"],
                       "trades": manifest["total_trades"],

@@ -7281,5 +7281,12 @@
   "source_sha256": {
     "prices": "5a5946e0bc7c4ab2650e3d6f15f275a4e21b8c5d430a47fefa5c1e5e358377e3",
     "trades": "b43b1532e498e9ca12a5001f6880ef97c3c6e29c4c8277e579eb0839c407157e"
+  },
+  "overview": {
+    "path": "overview.json.gz",
+    "sha256": "9082858c00ee5c2d2f3607d5b6cdbb39e83807212c77a9a63f74ac06bfc3ebac",
+    "bytes": 72490,
+    "rows": 4680,
+    "interval": 5000
   }
 }

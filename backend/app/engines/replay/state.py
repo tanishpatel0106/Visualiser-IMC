@@ -94,7 +94,7 @@ class ReplayState:
             "positions": {
                 p: pos.model_dump() for p, pos in self._positions.items()
             },
-            "pnl_history": [s.model_dump() for s in self._pnl_history[-200:]],
+            "pnl_history": [s.model_dump() for s in list(self._pnl_history)[-200:]],
             "inventory": self._build_inventory().model_dump(),
             "debug_frames": self._debug_frames[-100:],
             "trade_count": len(self._trade_tape),

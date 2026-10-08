@@ -129,7 +129,7 @@ function ParamInput({ param, value, onChange }: { param: StrategyParameter; valu
 
 export function StrategyPanel() {
   const { strategies, selectedStrategy, parameters, sourceCode, setSelectedStrategy, setParameter, setSourceCode, resetParameters } = useStrategyStore();
-  const { selectedProduct, selectedDay, products, days } = useDatasetStore();
+  const { selectedProduct, selectedDay, selectedWindow, products, days } = useDatasetStore();
   const { addRun, setCurrentRun, setMetrics, setTrace, setFills, setPnlHistory } = useBacktestStore();
   const setBottomTab = useUIStore((s) => s.setBottomTab);
 
@@ -379,6 +379,13 @@ export function StrategyPanel() {
         )}
 
         {/* Action buttons */}
+        {selectedWindow === -1 && (
+          <div style={styles.section}>
+            <p style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-muted)', margin: 0 }}>
+              Whole-day runs process every tick and may take several minutes. Results show up to 5,000 PnL points and the last 2,000 fills and debug frames; metrics use the complete run.
+            </p>
+          </div>
+        )}
         <div style={styles.actions}>
           {runError && (
             <div style={{ color: 'var(--danger)', fontSize: 'var(--font-size-xs)', flex: 1 }}>

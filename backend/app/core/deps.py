@@ -22,7 +22,7 @@ _strategy_registry: Optional[StrategyRegistry] = None
 _storage_service: Optional[StorageService] = None
 
 
-def get_dataset_service(window: int = 0) -> DatasetService:
+def get_dataset_service(window: int = -1) -> DatasetService:
     """Return the global DatasetService singleton."""
     global _dataset_service
     if settings.dataset_manifest and Path(settings.dataset_manifest).is_file():

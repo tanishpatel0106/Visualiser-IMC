@@ -187,11 +187,13 @@ def get_ohlcv(
     ds: DatasetService = Depends(get_dataset_service),
 ):
     """Return OHLCV bars for a product."""
-    snaps = ds.get_snapshots(product, day)
-    trades = ds.get_trades(product, day)
-
-    aggregator = DataAggregator()
-    bars = aggregator.aggregate_ohlcv(snaps, trades, interval)
+    if hasattr(ds, "get_ohlcv"):
+        bars, interval = ds.get_ohlcv(product, day, interval)
+    else:
+        snaps = ds.get_snapshots(product, day)
+        trades = ds.get_trades(product, day)
+        aggregator = DataAggregator()
+        bars = aggregator.aggregate_ohlcv(snaps, trades, interval)
     return {
         "product": product,
         "interval": interval,

@@ -25,7 +25,9 @@ class OrderBookEngine:
     previous states.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, retain_history: bool = True, history_limit: int | None = None) -> None:
+        self._retain_history = retain_history
+        self._history_limit = history_limit
         # product -> current VisibleOrderBook
         self._current_books: dict[str, VisibleOrderBook] = {}
         # product -> list of historical VisibleOrderBook snapshots
@@ -62,7 +64,11 @@ class OrderBookEngine:
 
         product = snapshot.product
         self._current_books[product] = book
-        self._book_history.setdefault(product, []).append(book)
+        if self._retain_history:
+            from collections import deque
+            history = self._book_history.setdefault(
+                product, deque(maxlen=self._history_limit) if self._history_limit else [])
+            history.append(book)
 
         return book
 

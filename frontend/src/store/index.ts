@@ -44,7 +44,7 @@ export const useDatasetStore = create<DatasetStoreState>((set) => ({
   days: [],
   selectedProduct: null,
   selectedDay: null,
-  selectedWindow: 0,
+  selectedWindow: -1,
   setSelectedWindow: (selectedWindow) => set({ selectedWindow }),
   setDatasetInfo: (info) =>
     set((prev) => {
@@ -67,8 +67,8 @@ export const useDatasetStore = create<DatasetStoreState>((set) => ({
         days,
         selectedProduct,
         selectedDay,
-        selectedWindow: info.windows?.some((w) => w.id === prev.selectedWindow)
-          ? prev.selectedWindow : 0,
+        selectedWindow: prev.selectedWindow === -1 || info.windows?.some((w) => w.id === prev.selectedWindow)
+          ? prev.selectedWindow : -1,
       };
     }),
   setProducts: (products) => set({ products }),

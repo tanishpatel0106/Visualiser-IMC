@@ -32,7 +32,7 @@ async def ws_replay(websocket: WebSocket):
     await websocket.accept()
 
     engine = get_replay_engine()
-    ds = get_dataset_service(window=int(websocket.query_params.get("window", "0")))
+    ds = get_dataset_service(window=int(websocket.query_params.get("window", "-1")))
     svc = ReplayService(engine, ds)
 
     playing = False

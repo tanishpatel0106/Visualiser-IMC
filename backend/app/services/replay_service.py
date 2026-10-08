@@ -53,6 +53,7 @@ class ReplayService:
         self._market_trades: dict[str, list[TradePrint]] = {}  # leftovers from previous matching
         self._pending_market_trades: dict[str, list[TradePrint]] = {}  # trades since last strategy call
         self._strategy_fills: list[dict] = []
+        self._total_strategy_fills = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -74,6 +75,11 @@ class ReplayService:
 
         self._engine.load_events(events)
         self._state.reset()
+        if getattr(events, "is_sorted_stream", False):
+            from collections import deque
+            from app.engines.orderbook.book import OrderBookEngine
+            self._state._book_engine = OrderBookEngine(history_limit=20)
+            self._state._pnl_history = deque(maxlen=2000)
         self._products = products
 
         # Reset strategy state
@@ -87,7 +93,8 @@ class ReplayService:
         self._own_trades = {p: [] for p in products}
         self._market_trades = {p: [] for p in products}
         self._pending_market_trades = {p: [] for p in products}
-        self._strategy_fills = []
+        self._strategy_fills = deque(maxlen=2000) if getattr(events, "is_sorted_stream", False) else []
+        self._total_strategy_fills = 0
 
         # If strategy_id is provided, set up strategy execution
         if strategy_id:
@@ -349,7 +356,7 @@ class ReplayService:
                 "fills": step_fills,
                 "positions": dict(self._positions),
                 "pnl": pnl,
-                "total_fills": len(self._strategy_fills),
+                "total_fills": self._total_strategy_fills,
             }
 
         except Exception as exc:
@@ -360,7 +367,7 @@ class ReplayService:
                 "fills": [],
                 "positions": dict(self._positions),
                 "pnl": self._compute_strategy_pnl(event.timestamp),
-                "total_fills": len(self._strategy_fills),
+                "total_fills": self._total_strategy_fills,
             }
 
     def _apply_conversions(self, conversions: int, state: Any) -> None:
@@ -419,6 +426,7 @@ class ReplayService:
             "is_aggressive": fill.is_aggressive,
         }
         self._strategy_fills.append(fill_dict)
+        self._total_strategy_fills += 1
 
         # Cash-flow PnL update
         if is_buy:

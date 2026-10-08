@@ -235,12 +235,13 @@ export function Header() {
       {!!datasetInfo?.windows?.length && <>
         <span style={styles.label}>RANGE</span>
         <select className="select select-sm" aria-label="NVDA time range"
-          title="Charts, replay and backtests use this time range"
+          title="Charts, replay and backtests use the selected time range"
           value={selectedWindow}
           onChange={(e) => {
             setSelectedWindow(Number(e.target.value));
             useReplayStore.getState().resetReplay();
           }} style={{ width: 195 }}>
+          <option value={-1}>Whole day</option>
           {datasetInfo.windows.map((w) => <option key={w.id} value={w.id}>
             {formatTimestamp(w.start)} – {formatTimestamp(w.end)}
           </option>)}

@@ -61,7 +61,8 @@ class ReplayEngine:
 
     def load_events(self, events: list[Event]) -> None:
         """Set (or replace) the event stream and reset the cursor."""
-        self._events = sorted(events, key=lambda e: (e.timestamp, e.sequence_num))
+        self._events = events if getattr(events, "is_sorted_stream", False) else sorted(
+            events, key=lambda e: (e.timestamp, e.sequence_num))
         self._current_index = -1
         self._is_playing = False
         self._frame_cache.clear()
@@ -109,6 +110,8 @@ class ReplayEngine:
         self._current_index = next_idx
         event = self._events[next_idx]
         self._frame_cache[next_idx] = event
+        if len(self._frame_cache) > 2048:
+            self._frame_cache.pop(next(iter(self._frame_cache)))
         return event
 
     def step_backward(self) -> Optional[Event]:
@@ -137,13 +140,15 @@ class ReplayEngine:
         if not self._events:
             return None
 
-        timestamps = [e.timestamp for e in self._events]
-        idx = bisect.bisect_right(timestamps, timestamp) - 1
+        idx = (self._events.seek_index(timestamp) if hasattr(self._events, "seek_index")
+               else bisect.bisect_right(self._events, timestamp, key=lambda event: event.timestamp) - 1)
         if idx < 0:
             idx = 0
         self._current_index = idx
         event = self._events[idx]
         self._frame_cache[idx] = event
+        if len(self._frame_cache) > 2048:
+            self._frame_cache.pop(next(iter(self._frame_cache)))
         return event
 
     # ------------------------------------------------------------------
@@ -166,6 +171,8 @@ class ReplayEngine:
                 self._current_index = i
                 event = self._events[i]
                 self._frame_cache[i] = event
+                if len(self._frame_cache) > 2048:
+                    self._frame_cache.pop(next(iter(self._frame_cache)))
                 return event
         return None
 

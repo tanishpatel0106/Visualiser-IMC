@@ -560,7 +560,7 @@ export function ChartPanel() {
     if (!selectedProduct) return;
     let active = true;
     setOhlcv([]);
-    const interval = chartMode === 'line' || chartMode === 'step' ? 500 : 5000;
+    const interval = selectedWindow === -1 ? 5000 : chartMode === 'line' || chartMode === 'step' ? 500 : 5000;
     api.fetchOHLCV(selectedProduct, interval, selectedDay)
       .then((bars) => { if (active) setOhlcv(bars); })
       .catch(console.error);

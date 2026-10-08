@@ -17,7 +17,8 @@ import copy
 import math
 import json
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
+from itertools import groupby
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -109,6 +110,14 @@ class BacktestEngine:
             status="running",
             started_at=started_at,
         )
+        self._streaming = getattr(events, "is_sorted_stream", False)
+        if self._streaming:
+            self._book_engine = OrderBookEngine(retain_history=False)
+            from app.engines.backtest.stream_storage import PnLFile, FillFile, OrderCount
+            self._pnl_history = PnLFile()
+            self._fills = FillFile()
+            self._all_orders = OrderCount()
+            self._debug_frames = deque(maxlen=2000)
 
         try:
             self._execute_events(events, strategy_callable)
@@ -119,10 +128,15 @@ class BacktestEngine:
             run.metrics = _sanitize_floats({
                 "performance": perf_metrics.model_dump(),
                 "execution": exec_metrics.model_dump(),
-                "pnl_history": [p.model_dump() for p in self._pnl_history],
+                "pnl_history": [p.model_dump() for p in self.get_pnl_history()],
                 "total_fills": len(self._fills),
                 "total_orders": len(self._all_orders),
             })
+            if self._streaming:
+                run.metrics["full_day"] = {
+                    "events_processed": len(events), "timestamps_processed": len(self._pnl_history),
+                    "pnl_plot_sampled": True, "debug_tail_limit": 2000, "fill_tail_limit": 2000,
+                }
             run.status = "completed"
 
         except Exception as exc:
@@ -147,6 +161,15 @@ class BacktestEngine:
             self._profit_loss.setdefault(p, 0.0)
             self._own_trades.setdefault(p, [])
             self._market_trades.setdefault(p, [])
+
+        if getattr(events, "is_sorted_stream", False):
+            for ts, values in groupby(events, key=lambda event: event.timestamp):
+                group = list(values)
+                self._process_timestamp(ts,
+                    [event for event in group if event.event_type == EventType.BOOK_SNAPSHOT],
+                    [event for event in group if event.event_type == EventType.TRADE_PRINT],
+                    strategy, sandbox, products)
+            return
 
         # Group events by timestamp
         events_by_ts: dict[int, dict[str, list[Event]]] = {}
@@ -625,10 +648,8 @@ class BacktestEngine:
         num_orders = len(self._all_orders)
         fill_count = len(self._fills)
 
-        aggressive_fills = [f for f in self._fills if f.is_aggressive]
-        passive_fills = [f for f in self._fills if not f.is_aggressive]
-        aggressive_vol = sum(f.quantity for f in aggressive_fills)
-        passive_vol = sum(f.quantity for f in passive_fills)
+        aggressive_vol = sum(f.quantity for f in self._fills if f.is_aggressive)
+        passive_vol = sum(f.quantity for f in self._fills if not f.is_aggressive)
         total_vol = aggressive_vol + passive_vol
 
         pa_ratio = (
@@ -717,16 +738,15 @@ class BacktestEngine:
         if len(self._pnl_history) < 2:
             return 0.0, 0.0
 
-        returns = [
-            self._pnl_history[i].total_pnl - self._pnl_history[i - 1].total_pnl
-            for i in range(1, len(self._pnl_history))
-        ]
-
-        if not returns:
-            return 0.0, 0.0
-
-        mean_ret = sum(returns) / len(returns)
-        variance = sum((r - mean_ret) ** 2 for r in returns) / len(returns)
+        def returns():
+            previous = None
+            for state in self._pnl_history:
+                if previous is not None:
+                    yield state.total_pnl - previous
+                previous = state.total_pnl
+        count = len(self._pnl_history) - 1
+        mean_ret = sum(returns()) / count
+        variance = sum((value - mean_ret) ** 2 for value in returns()) / count
         std_ret = math.sqrt(variance) if variance > 0 else 0.0
 
         if std_ret == 0:
@@ -760,9 +780,13 @@ class BacktestEngine:
         return list(self._debug_frames)
 
     def get_pnl_history(self) -> list[PnLState]:
+        if hasattr(self._pnl_history, "sampled"):
+            return self._pnl_history.sampled()
         return list(self._pnl_history)
 
     def get_fills(self) -> list[FillEvent]:
+        if getattr(self, "_streaming", False):
+            return [self._fills[index] for index in range(max(0, len(self._fills) - 2000), len(self._fills))]
         return list(self._fills)
 
 

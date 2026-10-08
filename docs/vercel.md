@@ -14,16 +14,24 @@ preserved without downsampling, including duplicate-timestamp price updates.
 The entire prepared dataset is approximately 15 MB compressed. The original
 multi-stock Git LFS pointers are no longer part of the deployment.
 
-The backend build copies `data/nvda` into its service. Startup loads one range,
-not the full day. The backend retains at most two ranges in memory, checks
+The backend build copies `data/nvda` into its service. Startup loads metadata,
+and charts use a precomputed whole-day overview. Tick readers retain at most two ranges in memory, check
 SHA-256 before decompression, and verifies loaded row counts against the
 manifest. `/api/datasets` returns NVDA, day 0, totals, and the available ranges.
 
-Use the frontend **RANGE** selector to choose among all 404 time ranges.
-Charts, replay, and backtests operate on the selected range, not the full day.
+The frontend **RANGE** selector defaults to **Whole day**, with all 404 shorter
+time ranges also available. Whole-day charts show 4,680 five-second candles,
+computed from every original snapshot and trade. Full-day replay and backtests
+read exact ticks on demand across all chunks, preserving ordering and strategy
+state. Backtests call the strategy once per timestamp, including at chunk boundaries.
+Full-day backtest PnL and fills are collected on temporary disk rather than
+keeping millions of objects in memory. Metrics use the complete run; the UI
+and saved exports contain up to 5,000 PnL points and the last 2,000 fills and
+debug frames. Choose a shorter range for detailed inspection of earlier fills.
 Changing ranges clears the replay state and reloads the chart. API data/replay/
 backtest requests use `?window=N`, where N is the range's manifest ID; omitting
-it selects range 0. The range boundaries vary because they contain about 10,000
+it or using `?window=-1` selects the whole day. Raw snapshot/trade list endpoints
+require a shorter range to bound response size. The range boundaries vary because they contain about 10,000
 price rows each; records sharing a timestamp stay together. Timestamps retain
 the original milliseconds from the start of the trading session.
 
@@ -90,6 +98,6 @@ Dataset display is prepared for Vercel, but these separate limits remain:
   instances. Shared replay needs a persistent host or shared-state redesign.
 - SQLite run/strategy storage defaults to writable but ephemeral `/tmp` on Vercel.
   Blob dataset persistence does not make those results durable.
-- Backtests are limited to the selected range and must fit function resource
-  and duration limits. Full-day backtesting belongs in an offline workflow or
-  a separate worker that streams ranges.
+- Full-day backtests process every tick but must still fit function resource
+  and duration limits. Long strategies can time out on Vercel; use the backend
+  on a persistent host or an offline worker for runs exceeding those limits.
